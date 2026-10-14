@@ -1,0 +1,2920 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SEO Platform — Tijeet Singh</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&family=Fraunces:ital,wght@0,300;0,600;1,300&display=swap"
+      rel="stylesheet"
+    />
+    <style>
+      *,
+      *::before,
+      *::after {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      :root {
+        --bg: #f5f4f0;
+        --surface: #ffffff;
+        --border: #e2e0da;
+        --border2: #ccc9c0;
+        --text: #1a1916;
+        --muted: #7a7870;
+        --accent: #1a6b3c;
+        --accent-lt: #e8f4ed;
+        --accent2: #c17d2a;
+        --accent2-lt: #fdf3e3;
+        --danger: #b03030;
+        --danger-lt: #fdeaea;
+        --warn: #b07a10;
+        --warn-lt: #fdf6e3;
+        --radius: 10px;
+        --radius-sm: 6px;
+        --font-head: "Fraunces", serif;
+        --font-body: "IBM Plex Sans", sans-serif;
+        --font-mono: "IBM Plex Mono", monospace;
+        --sidebar-w: 240px;
+        --nav-h: 56px;
+      }
+
+      html,
+      body {
+        height: 100%;
+      }
+
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-body);
+        font-size: 14px;
+        display: flex;
+        flex-direction: column;
+        min-height: 100vh;
+      }
+
+      /* ── Top Nav ─────────────────────────────────────────────── */
+      .topnav {
+        height: var(--nav-h);
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+        display: flex;
+        align-items: center;
+        padding: 0 24px;
+        gap: 16px;
+        position: sticky;
+        top: 0;
+        z-index: 100;
+        flex-shrink: 0;
+      }
+
+      .logo {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        text-decoration: none;
+      }
+
+      .logo-mark {
+        width: 28px;
+        height: 28px;
+        background: var(--accent);
+        border-radius: 6px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        font-family: var(--font-mono);
+        flex-shrink: 0;
+      }
+
+      .logo-text {
+        font-family: var(--font-head);
+        font-size: 17px;
+        font-weight: 600;
+        color: var(--text);
+        letter-spacing: -0.02em;
+      }
+
+      .logo-text em {
+        font-style: italic;
+        font-weight: 300;
+        color: var(--muted);
+      }
+
+      .nav-divider {
+        width: 1px;
+        height: 24px;
+        background: var(--border);
+        margin: 0 4px;
+      }
+
+      .nav-breadcrumb {
+        font-size: 12px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+      }
+
+      .nav-breadcrumb span {
+        color: var(--text);
+        font-weight: 500;
+      }
+
+      .nav-right {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .nav-tag {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        background: var(--accent-lt);
+        color: var(--accent);
+        border: 1px solid rgba(26, 107, 60, 0.15);
+        padding: 3px 8px;
+        border-radius: 99px;
+        letter-spacing: 0.04em;
+      }
+
+      .nav-avatar {
+        width: 30px;
+        height: 30px;
+        background: var(--text);
+        color: var(--bg);
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 11px;
+        font-weight: 600;
+        font-family: var(--font-mono);
+        cursor: pointer;
+      }
+
+      /* ── Layout ───────────────────────────────────────────────── */
+      .layout {
+        display: flex;
+        flex: 1;
+        min-height: 0;
+      }
+
+      /* ── Sidebar ──────────────────────────────────────────────── */
+      .sidebar {
+        width: var(--sidebar-w);
+        background: var(--surface);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        flex-shrink: 0;
+        overflow-y: auto;
+        position: sticky;
+        top: var(--nav-h);
+        height: calc(100vh - var(--nav-h));
+      }
+
+      .sidebar-section {
+        padding: 20px 16px 8px;
+      }
+
+      .sidebar-label {
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+        padding: 0 8px;
+        margin-bottom: 4px;
+      }
+
+      .nav-item {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 8px 10px;
+        border-radius: var(--radius-sm);
+        cursor: pointer;
+        transition: all 0.15s ease;
+        text-decoration: none;
+        color: var(--muted);
+        font-size: 13px;
+        font-weight: 400;
+        position: relative;
+        margin-bottom: 1px;
+      }
+
+      .nav-item:hover {
+        background: var(--bg);
+        color: var(--text);
+      }
+
+      .nav-item.active {
+        background: var(--accent-lt);
+        color: var(--accent);
+        font-weight: 500;
+      }
+
+      .nav-item.active::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 20%;
+        bottom: 20%;
+        width: 2px;
+        background: var(--accent);
+        border-radius: 0 2px 2px 0;
+      }
+
+      .nav-icon {
+        font-size: 14px;
+        flex-shrink: 0;
+        width: 18px;
+        text-align: center;
+      }
+
+      .nav-badge {
+        margin-left: auto;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        padding: 2px 6px;
+        border-radius: 99px;
+        font-weight: 500;
+      }
+
+      .badge-live {
+        background: var(--accent-lt);
+        color: var(--accent);
+      }
+      .badge-soon {
+        background: var(--bg);
+        color: var(--muted);
+        border: 1px solid var(--border);
+      }
+      .badge-new {
+        background: var(--accent2-lt);
+        color: var(--accent2);
+      }
+
+      .sidebar-footer {
+        margin-top: auto;
+        padding: 16px;
+        border-top: 1px solid var(--border);
+        font-size: 11px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+      }
+
+      /* ── Main content ─────────────────────────────────────────── */
+      .main {
+        flex: 1;
+        overflow-y: auto;
+        padding: 32px;
+        min-width: 0;
+      }
+
+      /* ── Page header ──────────────────────────────────────────── */
+      .page-header {
+        margin-bottom: 28px;
+        animation: fadeUp 0.4s ease both;
+      }
+
+      .page-eyebrow {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .page-title {
+        font-family: var(--font-head);
+        font-size: 26px;
+        font-weight: 600;
+        letter-spacing: -0.02em;
+        color: var(--text);
+        line-height: 1.2;
+      }
+
+      .page-title em {
+        font-style: italic;
+        font-weight: 300;
+        color: var(--muted);
+      }
+
+      .page-desc {
+        font-size: 13px;
+        color: var(--muted);
+        margin-top: 6px;
+        max-width: 520px;
+        line-height: 1.6;
+      }
+
+      /* ── Tabs ─────────────────────────────────────────────────── */
+      .tabs {
+        display: flex;
+        gap: 0;
+        border-bottom: 1px solid var(--border);
+        margin-bottom: 28px;
+        animation: fadeUp 0.4s 0.05s ease both;
+      }
+
+      .tab {
+        padding: 10px 18px;
+        font-size: 13px;
+        font-weight: 400;
+        color: var(--muted);
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        margin-bottom: -1px;
+        transition: all 0.15s ease;
+        white-space: nowrap;
+      }
+
+      .tab:hover {
+        color: var(--text);
+      }
+
+      .tab.active {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+        font-weight: 500;
+      }
+
+      /* ── Cards ────────────────────────────────────────────────── */
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 24px;
+        margin-bottom: 16px;
+      }
+
+      .card-title {
+        font-weight: 600;
+        font-size: 14px;
+        margin-bottom: 4px;
+      }
+
+      .card-desc {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+
+      /* ── Method cards grid (Dashboard) ───────────────────────── */
+      .methods-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+        gap: 14px;
+        margin-bottom: 28px;
+        animation: fadeUp 0.4s 0.1s ease both;
+      }
+
+      .method-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 20px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        position: relative;
+        overflow: hidden;
+        text-decoration: none;
+        display: block;
+        color: var(--text);
+      }
+
+      .method-card:hover {
+        border-color: var(--border2);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06);
+      }
+
+      .method-card.active-method {
+        border-color: var(--accent);
+      }
+      .method-card.active-method::after {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 2px;
+        background: var(--accent);
+      }
+
+      .method-card.coming-soon {
+        opacity: 0.55;
+        cursor: default;
+        pointer-events: none;
+      }
+
+      .method-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        margin-bottom: 12px;
+      }
+
+      .method-icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 8px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 18px;
+        flex-shrink: 0;
+      }
+
+      .icon-green {
+        background: var(--accent-lt);
+      }
+      .icon-amber {
+        background: var(--accent2-lt);
+      }
+      .icon-red {
+        background: var(--danger-lt);
+      }
+      .icon-gray {
+        background: var(--bg);
+      }
+
+      .method-status {
+        font-family: var(--font-mono);
+        font-size: 9px;
+        padding: 3px 7px;
+        border-radius: 99px;
+        font-weight: 500;
+        letter-spacing: 0.04em;
+      }
+
+      .status-live {
+        background: var(--accent-lt);
+        color: var(--accent);
+        border: 1px solid rgba(26, 107, 60, 0.15);
+      }
+      .status-soon {
+        background: var(--bg);
+        color: var(--muted);
+        border: 1px solid var(--border);
+      }
+      .status-wip {
+        background: var(--warn-lt);
+        color: var(--warn);
+        border: 1px solid rgba(176, 122, 16, 0.2);
+      }
+
+      .method-name {
+        font-family: var(--font-head);
+        font-size: 15px;
+        font-weight: 600;
+        margin-bottom: 4px;
+        letter-spacing: -0.01em;
+      }
+
+      .method-desc {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+        margin-bottom: 14px;
+      }
+
+      .method-checks {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+
+      .check-tag {
+        font-size: 10px;
+        font-family: var(--font-mono);
+        padding: 2px 7px;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--muted);
+      }
+
+      /* ── Stats row ────────────────────────────────────────────── */
+      .stats-row {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 12px;
+        margin-bottom: 28px;
+        animation: fadeUp 0.4s 0.08s ease both;
+      }
+
+      .stat-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px 20px;
+      }
+
+      .stat-val {
+        font-family: var(--font-head);
+        font-size: 28px;
+        font-weight: 600;
+        line-height: 1;
+        margin-bottom: 4px;
+      }
+
+      .stat-label {
+        font-size: 11px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+        letter-spacing: 0.04em;
+      }
+
+      .stat-card.s-green .stat-val {
+        color: var(--accent);
+      }
+      .stat-card.s-amber .stat-val {
+        color: var(--accent2);
+      }
+      .stat-card.s-red .stat-val {
+        color: var(--danger);
+      }
+
+      /* ── Upload area ──────────────────────────────────────────── */
+      .upload-zone {
+        border: 1.5px dashed var(--border2);
+        border-radius: var(--radius);
+        padding: 40px 24px;
+        text-align: center;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        background: var(--bg);
+        position: relative;
+      }
+
+      .upload-zone:hover,
+      .upload-zone.dragover {
+        border-color: var(--accent);
+        background: var(--accent-lt);
+      }
+
+      .upload-zone input {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        cursor: pointer;
+        width: 100%;
+        height: 100%;
+      }
+
+      .upload-icon-big {
+        font-size: 32px;
+        margin-bottom: 10px;
+        display: block;
+      }
+      .upload-title {
+        font-weight: 500;
+        font-size: 14px;
+        margin-bottom: 4px;
+      }
+      .upload-hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      /* File pill */
+      .file-pill {
+        display: none;
+        align-items: center;
+        gap: 10px;
+        background: var(--accent-lt);
+        border: 1px solid rgba(26, 107, 60, 0.2);
+        border-radius: var(--radius-sm);
+        padding: 10px 14px;
+        margin-top: 12px;
+        font-size: 13px;
+      }
+      .file-pill.show {
+        display: flex;
+      }
+      .file-pill-name {
+        font-family: var(--font-mono);
+        font-size: 12px;
+        color: var(--accent);
+        flex: 1;
+      }
+      .file-pill-size {
+        font-size: 11px;
+        color: var(--muted);
+      }
+      .btn-remove {
+        background: none;
+        border: none;
+        cursor: pointer;
+        color: var(--muted);
+        font-size: 14px;
+        padding: 2px 6px;
+        border-radius: 4px;
+        transition: color 0.15s;
+      }
+      .btn-remove:hover {
+        color: var(--danger);
+      }
+
+      /* ── Fields ───────────────────────────────────────────────── */
+      .field {
+        margin-bottom: 16px;
+      }
+
+      label {
+        display: block;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--muted);
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        margin-bottom: 6px;
+        font-family: var(--font-mono);
+      }
+
+      input[type="text"],
+      input[type="password"],
+      input[type="number"] {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 9px 12px;
+        color: var(--text);
+        font-family: var(--font-mono);
+        font-size: 13px;
+        outline: none;
+        transition:
+          border-color 0.15s,
+          background 0.15s;
+      }
+      input:focus {
+        border-color: var(--accent);
+        background: #fff;
+      }
+      input::placeholder {
+        color: var(--muted);
+        font-family: var(--font-body);
+      }
+
+      .input-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+      .input-hint {
+        font-size: 11px;
+        color: var(--muted);
+        margin-top: 5px;
+        line-height: 1.5;
+      }
+
+      .input-wrap {
+        position: relative;
+      }
+      .input-wrap input {
+        padding-right: 40px;
+      }
+      .toggle-vis {
+        position: absolute;
+        right: 10px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: none;
+        border: none;
+        color: var(--muted);
+        cursor: pointer;
+        font-size: 14px;
+        transition: color 0.15s;
+      }
+      .toggle-vis:hover {
+        color: var(--text);
+      }
+
+      /* Threshold row */
+      .threshold-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+
+      .threshold-box {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 14px;
+      }
+
+      .threshold-box label {
+        margin-bottom: 8px;
+      }
+
+      .threshold-inner {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .threshold-inner input {
+        width: 70px;
+        text-align: center;
+        font-size: 16px;
+        font-weight: 600;
+        color: var(--accent);
+        padding: 6px 8px;
+      }
+
+      .threshold-prefix {
+        font-size: 12px;
+        color: var(--muted);
+        white-space: nowrap;
+      }
+
+      /* ── Buttons ──────────────────────────────────────────────── */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 10px 20px;
+        border-radius: var(--radius-sm);
+        font-family: var(--font-body);
+        font-size: 13px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.15s ease;
+        border: none;
+        text-decoration: none;
+      }
+
+      .btn-primary {
+        background: var(--accent);
+        color: #fff;
+        width: 100%;
+        padding: 12px 20px;
+        font-size: 14px;
+      }
+      .btn-primary:hover:not(:disabled) {
+        background: #155c32;
+        box-shadow: 0 2px 12px rgba(26, 107, 60, 0.25);
+      }
+      .btn-primary:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
+
+      .btn-secondary {
+        background: transparent;
+        border: 1px solid var(--border);
+        color: var(--muted);
+        width: 100%;
+        padding: 10px 20px;
+        margin-top: 8px;
+      }
+      .btn-secondary:hover {
+        border-color: var(--border2);
+        color: var(--text);
+      }
+
+      .btn-download {
+        background: var(--accent);
+        color: #fff;
+        width: 100%;
+        padding: 12px 20px;
+        font-size: 14px;
+      }
+      .btn-download:hover {
+        background: #155c32;
+        box-shadow: 0 2px 12px rgba(26, 107, 60, 0.25);
+      }
+
+      /* ── Error ────────────────────────────────────────────────── */
+      .error-box {
+        display: none;
+        background: var(--danger-lt);
+        border: 1px solid rgba(176, 48, 48, 0.2);
+        border-radius: var(--radius-sm);
+        padding: 10px 14px;
+        font-size: 12px;
+        color: var(--danger);
+        margin-top: 12px;
+      }
+      .error-box.show {
+        display: block;
+      }
+
+      /* ── Progress / Terminal ──────────────────────────────────── */
+      .progress-wrap {
+        margin-bottom: 16px;
+      }
+
+      .progress-meta {
+        display: flex;
+        justify-content: space-between;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .progress-track {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        height: 6px;
+        overflow: hidden;
+      }
+
+      .progress-fill {
+        height: 100%;
+        background: var(--accent);
+        border-radius: 99px;
+        transition: width 0.4s ease;
+        width: 0%;
+      }
+
+      .terminal {
+        background: #fafaf8;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 14px;
+        height: 200px;
+        overflow-y: auto;
+        font-family: var(--font-mono);
+        font-size: 11.5px;
+        line-height: 1.7;
+        color: var(--muted);
+      }
+      .terminal::-webkit-scrollbar {
+        width: 3px;
+      }
+      .terminal::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 2px;
+      }
+
+      .log-line {
+        display: flex;
+        gap: 10px;
+      }
+      .log-time {
+        color: var(--border2);
+        flex-shrink: 0;
+      }
+      .log-good {
+        color: var(--accent);
+      }
+      .log-bad {
+        color: var(--danger);
+      }
+      .log-warn {
+        color: var(--warn);
+      }
+      .log-system {
+        color: var(--accent2);
+      }
+
+      /* Live stats */
+      .live-stats {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-top: 14px;
+      }
+
+      .ls-box {
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 12px;
+        text-align: center;
+      }
+      .ls-val {
+        font-family: var(--font-head);
+        font-size: 20px;
+        font-weight: 600;
+        line-height: 1;
+        margin-bottom: 3px;
+      }
+      .ls-label {
+        font-size: 10px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+      }
+      .ls-box.g .ls-val {
+        color: var(--accent);
+      }
+      .ls-box.w .ls-val {
+        color: var(--warn);
+      }
+      .ls-box.b .ls-val {
+        color: var(--danger);
+      }
+
+      /* ── Results summary ──────────────────────────────────────── */
+      .result-summary {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-bottom: 20px;
+      }
+
+      .res-box {
+        border-radius: var(--radius-sm);
+        padding: 18px;
+        text-align: center;
+        border: 1px solid;
+      }
+      .res-box.t {
+        background: var(--bg);
+        border-color: var(--border);
+      }
+      .res-box.g {
+        background: var(--accent-lt);
+        border-color: rgba(26, 107, 60, 0.15);
+      }
+      .res-box.b {
+        background: var(--danger-lt);
+        border-color: rgba(176, 48, 48, 0.15);
+      }
+
+      .res-val {
+        font-family: var(--font-head);
+        font-size: 32px;
+        font-weight: 600;
+        line-height: 1;
+        margin-bottom: 4px;
+      }
+      .res-box.t .res-val {
+        color: var(--text);
+      }
+      .res-box.g .res-val {
+        color: var(--accent);
+      }
+      .res-box.b .res-val {
+        color: var(--danger);
+      }
+      .res-label {
+        font-size: 11px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+      }
+
+      /* ── Views ────────────────────────────────────────────────── */
+      .view {
+        display: none;
+      }
+      .view.active {
+        display: block;
+      }
+
+      /* ── Step indicator (inline) ──────────────────────────────── */
+      .step-row {
+        display: flex;
+        align-items: center;
+        gap: 0;
+        margin-bottom: 24px;
+        animation: fadeUp 0.4s 0.06s ease both;
+      }
+
+      .step-item {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .step-num-sm {
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--muted);
+        transition: all 0.2s;
+        flex-shrink: 0;
+      }
+      .step-item.active {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .step-item.active .step-num-sm {
+        border-color: var(--accent);
+        background: var(--accent-lt);
+        color: var(--accent);
+      }
+      .step-item.done .step-num-sm {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #fff;
+      }
+      .step-item.done {
+        color: var(--muted);
+      }
+      .step-connector {
+        width: 32px;
+        height: 1px;
+        background: var(--border);
+        margin: 0 4px;
+        transition: background 0.3s;
+      }
+      .step-connector.done {
+        background: var(--accent);
+      }
+
+      /* ── Sections within a card ───────────────────────────────── */
+      .section-divider {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 20px 0;
+      }
+
+      /* ── Animations ───────────────────────────────────────────── */
+      @keyframes fadeUp {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      /* ── Coming soon overlay ──────────────────────────────────── */
+      .coming-overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(245, 244, 240, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: var(--radius);
+        backdrop-filter: blur(2px);
+      }
+      .coming-pill {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        padding: 5px 12px;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 99px;
+        color: var(--muted);
+      }
+
+      /* ── Responsive ───────────────────────────────────────────── */
+      @media (max-width: 768px) {
+        .sidebar {
+          display: none;
+        }
+        .stats-row {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .live-stats {
+          grid-template-columns: repeat(2, 1fr);
+        }
+        .result-summary {
+          grid-template-columns: 1fr;
+        }
+        .input-row,
+        .threshold-grid {
+          grid-template-columns: 1fr;
+        }
+        .main {
+          padding: 20px;
+        }
+      }
+      /* ─── Auto-Upload Dashboard ───────────────────────────────── */
+      .methods-list {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        margin-bottom: 12px;
+      }
+      .method-row {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        padding: 12px 14px;
+        background: #fafbfc;
+        border: 1px solid #e9ecef;
+        border-radius: 8px;
+      }
+      .method-row-icon {
+        width: 38px;
+        height: 38px;
+        border-radius: 8px;
+        background: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 20px;
+        flex-shrink: 0;
+        border: 1px solid #e9ecef;
+      }
+      .method-row-info {
+        flex: 1;
+        min-width: 0;
+      }
+      .method-row-name {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 2px;
+      }
+      .method-row-count {
+        font-size: 12px;
+        color: var(--muted);
+        font-family: var(--font-mono);
+      }
+      .picker-label {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-top: 16px;
+        margin-bottom: 10px;
+      }
+      .radio-option {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 12px 14px;
+        background: #fafbfc;
+        border: 1px solid #e9ecef;
+        border-radius: 8px;
+        margin-bottom: 8px;
+        cursor: pointer;
+        transition: all 0.15s;
+      }
+      .radio-option:hover {
+        border-color: var(--accent);
+        background: #f0f7ff;
+      }
+      .radio-option input[type="radio"] {
+        margin-top: 3px;
+        cursor: pointer;
+      }
+      .radio-option input[type="radio"]:checked + div .radio-title {
+        color: var(--accent);
+      }
+      .radio-title {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .radio-desc {
+        font-size: 12px;
+        color: var(--muted);
+        line-height: 1.5;
+      }
+      /* ─── Project Info Grid ──────────────────────────────────── */
+      .project-info-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+      }
+      .project-info-item {
+        background: #fafbfc;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 12px;
+      }
+      .project-info-item.missing {
+        background: #fff8f8;
+        border-color: #ffcdd2;
+      }
+      .project-info-label {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        margin-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .field-badge {
+        font-size: 9px;
+        font-weight: 700;
+        padding: 2px 6px;
+        border-radius: 999px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .field-badge.present {
+        background: #e8f5e9;
+        color: #2e7d32;
+      }
+      .field-badge.missing {
+        background: #ffebee;
+        color: #c62828;
+      }
+      .project-info-tags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+      }
+      .project-tag {
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 12px;
+        font-weight: 500;
+      }
+      .project-tag.present {
+        background: #e8f5e9;
+        color: #2e7d32;
+        border: 1px solid #a5d6a7;
+      }
+      .project-tag.missing-tag {
+        background: #ffebee;
+        color: #c62828;
+        border: 1px solid #ffcdd2;
+        font-style: italic;
+        font-size: 11px;
+      }
+      .meta-input {
+        width: 100%;
+        border: 1px solid #ffcdd2;
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 13px;
+        margin-top: 4px;
+        box-sizing: border-box;
+        background: #fff;
+        color: var(--fg);
+        outline: none;
+        transition: border-color 0.15s;
+      }
+      .meta-input:focus {
+        border-color: var(--accent);
+      }
+      .meta-input::placeholder {
+        color: #bbb;
+      }
+      /* ─── Contact Details Form ───────────────────────────────── */
+      .telegram-instructions {
+        background: #f0f7ff;
+        border: 1px solid #c5dff8;
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 14px;
+      }
+      .tg-instruction-title {
+        font-size: 13px;
+        font-weight: 600;
+        color: #1565c0;
+        margin-bottom: 10px;
+      }
+      .tg-steps {
+        display: flex;
+        flex-direction: column;
+        gap: 7px;
+      }
+      .tg-step {
+        display: flex;
+        align-items: flex-start;
+        gap: 10px;
+        font-size: 12px;
+        color: #333;
+        line-height: 1.5;
+      }
+      .tg-step-num {
+        background: #1565c0;
+        color: white;
+        border-radius: 999px;
+        width: 18px;
+        height: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 10px;
+        font-weight: 700;
+        flex-shrink: 0;
+        margin-top: 1px;
+      }
+      .tg-step code {
+        background: #e3f2fd;
+        color: #1565c0;
+        padding: 1px 5px;
+        border-radius: 4px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+      }
+      .contact-section {
+        margin-top: 16px;
+        padding-top: 16px;
+        border-top: 1px solid var(--border);
+      }
+      .contact-section-title {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 12px;
+      }
+      .contact-person-card {
+        background: #fafbfc;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px 14px;
+        margin-bottom: 10px;
+      }
+      .contact-person-header {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+      }
+      .contact-person-role {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        background: #f0f0f0;
+        padding: 2px 8px;
+        border-radius: 999px;
+      }
+      .contact-person-name {
+        font-size: 14px;
+        font-weight: 600;
+      }
+      .contact-fields {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+      }
+      .contact-field label {
+        font-size: 11px;
+        color: var(--muted);
+        display: block;
+        margin-bottom: 4px;
+        font-family: var(--font-mono);
+      }
+      .contact-field input {
+        width: 100%;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        box-sizing: border-box;
+        background: #fff;
+        outline: none;
+        transition: border-color 0.15s;
+      }
+      .contact-field input:focus {
+        border-color: var(--accent);
+      }
+      .contact-field input::placeholder {
+        color: #bbb;
+      }
+      .detected-row {
+        display: flex;
+        align-items: center;
+        gap: 16px;
+      }
+      .detected-icon {
+        width: 56px;
+        height: 56px;
+        border-radius: 12px;
+        background: #e8f5e9;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 28px;
+        flex-shrink: 0;
+      }
+      .detected-label {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        margin-bottom: 4px;
+      }
+      .detected-name {
+        font-size: 20px;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .detected-meta {
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .detect-badge {
+        padding: 5px 12px;
+        border-radius: 999px;
+        font-size: 11px;
+        font-weight: 600;
+        font-family: var(--font-mono);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .detect-badge.s-supported {
+        background: #d4edda;
+        color: #155724;
+      }
+      .detect-badge.s-unsupported {
+        background: #fff3cd;
+        color: #856404;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Top Nav -->
+    <nav class="topnav">
+      <a href="#" class="logo" onclick="showView('dashboard')">
+        <div class="logo-mark">S↑</div>
+        <div class="logo-text">SEO <em>Platform</em></div>
+      </a>
+      <div class="nav-divider"></div>
+      <div class="nav-breadcrumb" id="breadcrumb">/ <span>Dashboard</span></div>
+      <div class="nav-right">
+        <div class="nav-tag">Internal Tool</div>
+        <div class="nav-avatar" title="Tijeet Singh">TS</div>
+      </div>
+    </nav>
+
+    <div class="layout">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-section">
+          <div class="sidebar-label">Overview</div>
+          <a
+            class="nav-item active"
+            id="nav-dashboard"
+            onclick="showView('dashboard')"
+          >
+            <span class="nav-icon">⊞</span> Dashboard
+          </a>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-label">Audit Methods</div>
+          <a
+            class="nav-item"
+            id="nav-bookmarking"
+            onclick="showView('bookmarking')"
+          >
+            <span class="nav-icon">🔖</span> Bookmarking
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">📋</span> Classifieds
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">🌐</span> Web 2.0
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">📄</span> Article Submission
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">🖼️</span> Image Sharing
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">👤</span> Profile Creations
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">🏢</span> Business Listing
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">📰</span> Press Release
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">📑</span> PDF Submission
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">✍️</span> Guest Post
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">💬</span> Forums
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+          <a class="nav-item" onclick="showView('bookmarking')">
+            <span class="nav-icon">✏️</span> On-site Blog
+            <span class="nav-badge badge-live">Live</span>
+          </a>
+        </div>
+
+        <div class="sidebar-footer">
+          v2.0 · Playwright Edition<br />
+          Built for Tijeet Singh's Team
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+        <!-- ── DASHBOARD VIEW ───────────────────────────────── -->
+        <div class="view active" id="view-dashboard">
+          <div class="page-header">
+            <div class="page-eyebrow">SEO Audit Platform</div>
+            <h1 class="page-title">Upload your <em>backlink sheet</em></h1>
+            <p class="page-desc">
+              Drop your Excel file below. We'll auto-detect the SEO method from
+              the sheet and run the right audit for you.
+            </p>
+          </div>
+
+          <!-- ── STEP 1: Upload zone (full width) ─────────────────────── -->
+          <div class="card" id="auto-upload-card" style="margin-bottom: 20px">
+            <div
+              class="upload-zone"
+              id="auto-upload-zone"
+              style="cursor: pointer"
+            >
+              <div class="upload-icon">📊</div>
+              <div class="upload-text">Drop your backlink sheet here</div>
+              <div class="upload-hint">
+                or click to browse — .xlsx files only
+              </div>
+              <input
+                type="file"
+                id="auto-file-input"
+                accept=".xlsx"
+                style="display: none"
+              />
+            </div>
+
+            <!-- Filled state — shown after upload -->
+            <div class="file-pill" id="auto-file-pill" style="display: none">
+              <div class="file-pill-icon">📄</div>
+              <div class="file-pill-info">
+                <div class="file-pill-name" id="auto-file-name">
+                  filename.xlsx
+                </div>
+                <div class="file-pill-size" id="auto-file-meta">
+                  analysing...
+                </div>
+              </div>
+              <button class="btn-icon" id="auto-file-clear">✕</button>
+            </div>
+          </div>
+
+          <!-- ── STEP 2: Detected method card (hidden until detection done) -->
+          <div
+            class="card"
+            id="auto-detected-card"
+            style="display: none; margin-bottom: 20px"
+          >
+            <div class="detected-row">
+              <div class="detected-icon" id="auto-detect-icon">🔖</div>
+              <div style="flex: 1; min-width: 0">
+                <div class="detected-label">Detected method</div>
+                <div class="detected-name" id="auto-detect-name">
+                  Blog Bookmarking
+                </div>
+                <div class="detected-meta" id="auto-detect-meta">
+                  50 backlinks ready to audit
+                </div>
+              </div>
+              <div id="auto-detect-status"></div>
+            </div>
+
+            <div
+              id="auto-unsupported-warn"
+              style="
+                display: none;
+                margin-top: 14px;
+                padding: 12px 14px;
+                background: #fff4e6;
+                border: 1px solid #ffc066;
+                border-radius: 6px;
+                font-size: 13px;
+                color: #663c00;
+              "
+            >
+              ⚠️ <strong>This method isn't supported yet.</strong> Currently
+              only <em>Blog Bookmarking</em> audits are available. More methods
+              are being built — try uploading a Blog Bookmarking sheet for now.
+            </div>
+
+            <button
+              class="btn-primary"
+              id="auto-btn-run"
+              style="width: 100%; margin-top: 16px"
+              disabled
+            >
+              <span>⚡</span>
+              <span>Run Audit</span>
+            </button>
+          </div>
+
+          <!-- ── STEP 3: Progress card (shown while running) ───────────── -->
+          <div
+            class="card"
+            id="auto-progress-card"
+            style="display: none; margin-bottom: 20px"
+          >
+            <div class="progress-row">
+              <div class="progress-label">Auditing backlinks</div>
+              <div class="progress-count" id="auto-prog-count">0 / 0</div>
+            </div>
+            <div class="progress-bar">
+              <div
+                class="progress-fill"
+                id="auto-prog-bar"
+                style="width: 0%"
+              ></div>
+            </div>
+
+            <div class="live-stats">
+              <div class="live-stat">
+                <div class="live-stat-val" id="auto-stat-total">0</div>
+                <div class="live-stat-label">Total</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-stat-val s-green" id="auto-stat-good">0</div>
+                <div class="live-stat-label">Good</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-stat-val s-amber" id="auto-stat-warn">0</div>
+                <div class="live-stat-label">Manual</div>
+              </div>
+              <div class="live-stat">
+                <div class="live-stat-val s-red" id="auto-stat-bad">0</div>
+                <div class="live-stat-label">Flagged</div>
+              </div>
+            </div>
+
+            <div class="terminal" id="auto-terminal">
+              <div class="log-line log-system">
+                Waiting for audit to start...
+              </div>
+            </div>
+          </div>
+
+          <!-- ── STEP 4: Results / Download (shown when done) ──────────── -->
+          <div class="card" id="auto-results-card" style="display: none">
+            <div style="text-align: center; padding: 20px 0">
+              <div style="font-size: 48px; margin-bottom: 12px">✅</div>
+              <div
+                style="font-size: 22px; font-weight: 600; margin-bottom: 6px"
+              >
+                Audit complete!
+              </div>
+              <div style="color: var(--muted); margin-bottom: 24px">
+                <span id="auto-res-total">0</span> backlinks checked •
+                <span id="auto-res-good">0</span> good •
+                <span id="auto-res-bad">0</span> need attention
+              </div>
+
+              <a
+                class="btn-primary"
+                id="auto-btn-download"
+                href="#"
+                download="Backlinks_AUDITED.xlsx"
+                style="margin-right: 10px"
+              >
+                <span>⬇</span>
+                <span>Download Report</span>
+              </a>
+
+              <button class="btn-secondary" id="auto-btn-reset">
+                Audit another sheet
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── BLOG BOOKMARKING VIEW ────────────────────────── -->
+        <div class="view" id="view-bookmarking">
+          <div class="page-header">
+            <div class="page-eyebrow">Link Building → Blog Bookmarking</div>
+            <h1 class="page-title">Backlink <em>Auditor</em></h1>
+            <p class="page-desc">
+              Upload your team's Excel sheet — DA, SS, liveness and keyword
+              checks run automatically.
+            </p>
+          </div>
+
+          <!-- Step indicator -->
+          <div class="step-row">
+            <div class="step-item active" id="bk-step-1">
+              <div class="step-num-sm">1</div>
+              Upload
+            </div>
+            <div class="step-connector" id="bk-line-1"></div>
+            <div class="step-item" id="bk-step-2">
+              <div class="step-num-sm">2</div>
+              Configure
+            </div>
+            <div class="step-connector" id="bk-line-2"></div>
+            <div class="step-item" id="bk-step-3">
+              <div class="step-num-sm">3</div>
+              Auditing
+            </div>
+            <div class="step-connector" id="bk-line-3"></div>
+            <div class="step-item" id="bk-step-4">
+              <div class="step-num-sm">4</div>
+              Download
+            </div>
+          </div>
+
+          <div
+            style="
+              display: grid;
+              grid-template-columns: 1fr 340px;
+              gap: 16px;
+              align-items: start;
+            "
+          >
+            <!-- Left column -->
+            <div>
+              <!-- Upload card -->
+              <div class="card" style="animation: fadeUp 0.4s ease both">
+                <div class="card-title">📂 &nbsp;Upload Sheet</div>
+                <div class="card-desc" style="margin-bottom: 16px">
+                  Excel file (.xlsx) — sheet tab must be named
+                  <strong>Backlinks</strong>
+                </div>
+                <div class="upload-zone" id="bk-upload-zone">
+                  <input type="file" id="bk-file-input" accept=".xlsx" />
+                  <span class="upload-icon-big">📊</span>
+                  <div class="upload-title">Drop your Excel file here</div>
+                  <div class="upload-hint">
+                    or click to browse &nbsp;·&nbsp; .xlsx only
+                  </div>
+                </div>
+                <div class="file-pill" id="bk-file-pill">
+                  <span>📗</span>
+                  <span class="file-pill-name" id="bk-pill-name"></span>
+                  <span class="file-pill-size" id="bk-pill-size"></span>
+                  <button class="btn-remove" id="bk-file-remove">✕</button>
+                </div>
+              </div>
+
+              <!-- Progress card (hidden until run) -->
+              <div
+                class="card"
+                id="bk-progress-card"
+                style="display: none; animation: fadeUp 0.4s ease both"
+              >
+                <div class="card-title" style="margin-bottom: 16px">
+                  ⚙️ &nbsp;Audit in Progress
+                </div>
+
+                <div class="progress-wrap">
+                  <div class="progress-meta">
+                    <span>Checking backlinks...</span>
+                    <span
+                      id="bk-prog-count"
+                      style="font-family: var(--font-mono)"
+                      >0 / 0</span
+                    >
+                  </div>
+                  <div class="progress-track">
+                    <div class="progress-fill" id="bk-prog-bar"></div>
+                  </div>
+                </div>
+
+                <div class="terminal" id="bk-terminal"></div>
+
+                <div class="live-stats">
+                  <div class="ls-box">
+                    <div class="ls-val" id="ls-total">0</div>
+                    <div class="ls-label">Total</div>
+                  </div>
+                  <div class="ls-box g">
+                    <div class="ls-val" id="ls-good">0</div>
+                    <div class="ls-label">Good</div>
+                  </div>
+                  <div class="ls-box w">
+                    <div class="ls-val" id="ls-warn">0</div>
+                    <div class="ls-label">Check</div>
+                  </div>
+                  <div class="ls-box b">
+                    <div class="ls-val" id="ls-bad">0</div>
+                    <div class="ls-label">Flagged</div>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Results card (hidden until done) -->
+              <div
+                class="card"
+                id="bk-results-card"
+                style="display: none; animation: fadeUp 0.4s ease both"
+              >
+                <div class="card-title" style="margin-bottom: 16px">
+                  ✅ &nbsp;Audit Complete
+                </div>
+                <div class="result-summary">
+                  <div class="res-box t">
+                    <div class="res-val" id="res-total">0</div>
+                    <div class="res-label">Total</div>
+                  </div>
+                  <div class="res-box g">
+                    <div class="res-val" id="res-good">0</div>
+                    <div class="res-label">Good</div>
+                  </div>
+                  <div class="res-box b">
+                    <div class="res-val" id="res-bad">0</div>
+                    <div class="res-label">Flagged</div>
+                  </div>
+                </div>
+                <a class="btn btn-download" id="bk-btn-download" href="#"
+                  >⬇ &nbsp;Download Audited Report</a
+                >
+                <button class="btn btn-secondary" id="bk-btn-reset">
+                  ↩ &nbsp;Run another audit
+                </button>
+              </div>
+            </div>
+
+            <!-- Right column: config -->
+            <div>
+              <div
+                class="card"
+                style="
+                  animation: fadeUp 0.4s 0.08s ease both;
+                  position: sticky;
+                  top: calc(var(--nav-h) + 20px);
+                "
+              >
+                <div class="card-title" style="margin-bottom: 4px">
+                  🔑 &nbsp;Moz API
+                  <span
+                    style="
+                      font-size: 10px;
+                      font-weight: 400;
+                      color: var(--muted);
+                      font-family: var(--font-mono);
+                    "
+                    >(optional)</span
+                  >
+                </div>
+                <div class="card-desc" style="margin-bottom: 16px">
+                  Leave blank for now — DA &amp; SS checks will be added later.
+                  Get keys at
+                  <a
+                    href="https://moz.com/api"
+                    target="_blank"
+                    style="color: var(--accent)"
+                    >moz.com/api</a
+                  >
+                </div>
+
+                <div class="field">
+                  <label
+                    >Access ID
+                    <span style="color: var(--muted); font-weight: 400"
+                      >(optional)</span
+                    ></label
+                  >
+                  <input
+                    type="text"
+                    id="bk-moz-id"
+                    placeholder="Leave blank — not required yet"
+                  />
+                </div>
+
+                <div class="field">
+                  <label
+                    >Secret Key
+                    <span style="color: var(--muted); font-weight: 400"
+                      >(optional)</span
+                    ></label
+                  >
+                  <div class="input-wrap">
+                    <input
+                      type="password"
+                      id="bk-moz-secret"
+                      placeholder="Leave blank — not required yet"
+                    />
+                    <button class="toggle-vis" id="bk-toggle-secret">👁</button>
+                  </div>
+                </div>
+
+                <hr class="section-divider" />
+
+                <div class="card-title" style="margin-bottom: 12px">
+                  ⚡ &nbsp;Thresholds
+                </div>
+                <div class="threshold-grid">
+                  <div class="threshold-box">
+                    <label>DA Flag If</label>
+                    <div class="threshold-inner">
+                      <span class="threshold-prefix">Below</span>
+                      <input
+                        type="number"
+                        id="bk-da"
+                        value="30"
+                        min="1"
+                        max="100"
+                      />
+                    </div>
+                  </div>
+                  <div class="threshold-box">
+                    <label>SS Flag If</label>
+                    <div class="threshold-inner">
+                      <input
+                        type="number"
+                        id="bk-ss"
+                        value="20"
+                        min="1"
+                        max="100"
+                      />
+                      <span class="threshold-prefix">% over</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="error-box" id="bk-error"></div>
+
+                <button
+                  class="btn btn-primary"
+                  id="bk-btn-run"
+                  disabled
+                  style="margin-top: 16px"
+                >
+                  🚀 &nbsp; Run Audit
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ── COMING SOON VIEW ─────────────────────────────── -->
+        <div class="view" id="view-coming">
+          <div class="page-header">
+            <div class="page-eyebrow">Coming Soon</div>
+            <h1 class="page-title">Under <em>Construction</em></h1>
+            <p class="page-desc">
+              This audit method is on the roadmap. We're building it next —
+              check back soon.
+            </p>
+          </div>
+          <div class="card" style="text-align: center; padding: 60px 24px">
+            <div style="font-size: 48px; margin-bottom: 16px">🔧</div>
+            <div
+              style="
+                font-family: var(--font-head);
+                font-size: 18px;
+                font-weight: 600;
+                margin-bottom: 8px;
+              "
+            >
+              Being Built
+            </div>
+            <div
+              style="
+                font-size: 13px;
+                color: var(--muted);
+                max-width: 360px;
+                margin: 0 auto;
+              "
+            >
+              This module will be added to the platform soon. All methods follow
+              the same audit pattern — upload sheet, configure, download
+              results.
+            </div>
+            <button
+              class="btn btn-secondary"
+              style="width: auto; margin-top: 24px; padding: 10px 24px"
+              onclick="showView('dashboard')"
+            >
+              ← Back to Dashboard
+            </button>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <script>
+      // ── View routing ───────────────────────────────────────────
+      function showView(name) {
+        document
+          .querySelectorAll(".view")
+          .forEach((v) => v.classList.remove("active"));
+        document
+          .querySelectorAll(".nav-item")
+          .forEach((n) => n.classList.remove("active"));
+
+        document.getElementById("view-" + name).classList.add("active");
+
+        const navMap = {
+          dashboard: "nav-dashboard",
+          bookmarking: "nav-bookmarking",
+          coming: null,
+        };
+        if (navMap[name])
+          document.getElementById(navMap[name]).classList.add("active");
+
+        const breadMap = {
+          dashboard: "/ <span>Dashboard</span>",
+          bookmarking: "/ Dashboard / <span>Blog Bookmarking</span>",
+          coming: "/ Dashboard / <span>Coming Soon</span>",
+        };
+        document.getElementById("breadcrumb").innerHTML = breadMap[name] || "";
+
+        window.scrollTo(0, 0);
+      }
+
+      // ── Bookmarking module ─────────────────────────────────────
+      let bkFile = null;
+      let bkStats = { total: 0, good: 0, warn: 0, bad: 0 };
+
+      const bkUploadZone = document.getElementById("bk-upload-zone");
+      const bkFileInput = document.getElementById("bk-file-input");
+      const bkFilePill = document.getElementById("bk-file-pill");
+      const bkPillName = document.getElementById("bk-pill-name");
+      const bkPillSize = document.getElementById("bk-pill-size");
+      const bkFileRemove = document.getElementById("bk-file-remove");
+      const bkMozId = document.getElementById("bk-moz-id");
+      const bkMozSecret = document.getElementById("bk-moz-secret");
+      const bkToggleSecret = document.getElementById("bk-toggle-secret");
+      const bkBtnRun = document.getElementById("bk-btn-run");
+      const bkError = document.getElementById("bk-error");
+      const bkProgressCard = document.getElementById("bk-progress-card");
+      const bkResultsCard = document.getElementById("bk-results-card");
+      const bkTerminal = document.getElementById("bk-terminal");
+      const bkProgBar = document.getElementById("bk-prog-bar");
+      const bkProgCount = document.getElementById("bk-prog-count");
+      const bkBtnDownload = document.getElementById("bk-btn-download");
+      const bkBtnReset = document.getElementById("bk-btn-reset");
+
+      // Drag & drop
+      bkUploadZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        bkUploadZone.classList.add("dragover");
+      });
+      bkUploadZone.addEventListener("dragleave", () =>
+        bkUploadZone.classList.remove("dragover"),
+      );
+      bkUploadZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        bkUploadZone.classList.remove("dragover");
+        if (e.dataTransfer.files[0]) handleBkFile(e.dataTransfer.files[0]);
+      });
+      bkFileInput.addEventListener("change", () => {
+        if (bkFileInput.files[0]) handleBkFile(bkFileInput.files[0]);
+      });
+
+      function handleBkFile(f) {
+        if (!f.name.endsWith(".xlsx")) {
+          showBkError("Only .xlsx files are supported.");
+          return;
+        }
+        bkFile = f;
+        bkPillName.textContent = f.name;
+        bkPillSize.textContent = fmtBytes(f.size);
+        bkFilePill.classList.add("show");
+        bkUploadZone.style.display = "none";
+        bkCheckReady();
+        bkSetStep(2);
+      }
+
+      bkFileRemove.addEventListener("click", () => {
+        bkFile = null;
+        bkFileInput.value = "";
+        bkFilePill.classList.remove("show");
+        bkUploadZone.style.display = "";
+        bkCheckReady();
+        bkSetStep(1);
+      });
+
+      bkToggleSecret.addEventListener("click", () => {
+        const isPass = bkMozSecret.type === "password";
+        bkMozSecret.type = isPass ? "text" : "password";
+        bkToggleSecret.textContent = isPass ? "🔒" : "👁";
+      });
+
+      [bkMozId, bkMozSecret].forEach((el) =>
+        el.addEventListener("input", bkCheckReady),
+      );
+
+      function bkCheckReady() {
+        bkBtnRun.disabled = !bkFile;
+      }
+
+      function showBkError(msg) {
+        bkError.textContent = "⚠ " + msg;
+        bkError.classList.add("show");
+        setTimeout(() => bkError.classList.remove("show"), 4000);
+      }
+
+      function bkSetStep(n) {
+        for (let i = 1; i <= 4; i++) {
+          const s = document.getElementById(`bk-step-${i}`);
+          s.classList.remove("active", "done");
+          if (i < n) s.classList.add("done");
+          if (i === n) s.classList.add("active");
+        }
+        for (let i = 1; i <= 3; i++) {
+          const l = document.getElementById(`bk-line-${i}`);
+          if (l) l.classList.toggle("done", i < n);
+        }
+      }
+
+      // Terminal log
+      function bkLog(msg, cls = "") {
+        const t = new Date().toLocaleTimeString("en-IN", { hour12: false });
+        const d = document.createElement("div");
+        d.className = "log-line";
+        d.innerHTML = `<span class="log-time">${t}</span><span class="${cls}">${msg}</span>`;
+        bkTerminal.appendChild(d);
+        bkTerminal.scrollTop = bkTerminal.scrollHeight;
+      }
+
+      function bkUpdateStats(type) {
+        bkStats[type]++;
+        document.getElementById("ls-total").textContent = bkStats.total;
+        document.getElementById("ls-good").textContent = bkStats.good;
+        document.getElementById("ls-warn").textContent = bkStats.warn;
+        document.getElementById("ls-bad").textContent = bkStats.bad;
+      }
+
+      bkBtnRun.addEventListener("click", runBkAudit);
+
+      let currentJobId = null;
+      let pollTimer = null;
+      let lastLogCount = 0;
+
+      async function runBkAudit() {
+        if (!bkFile) return;
+
+        // Reset state
+        bkStats = { total: 0, good: 0, warn: 0, bad: 0 };
+        bkTerminal.innerHTML = "";
+        bkProgBar.style.width = "0%";
+        bkProgCount.textContent = "0 / 0";
+        lastLogCount = 0;
+        currentJobId = null;
+        if (pollTimer) clearInterval(pollTimer);
+
+        bkProgressCard.style.display = "block";
+        bkResultsCard.style.display = "none";
+        bkBtnRun.disabled = true;
+        bkSetStep(3);
+
+        bkLog("Uploading file to server...", "log-system");
+
+        const formData = new FormData();
+        formData.append("file", bkFile);
+
+        // Only send moz_key if both fields are filled
+        const mozId = bkMozId.value.trim();
+        const mozSecret = bkMozSecret.value.trim();
+        if (mozId && mozSecret) {
+          formData.append("moz_key", mozId + ":" + mozSecret);
+          bkLog("Moz API key provided — DA/SS checks enabled.", "log-system");
+        } else {
+          bkLog(
+            "No Moz key — DA/SS will show — (can add later).",
+            "log-system",
+          );
+        }
+
+        try {
+          const resp = await fetch(apiUrl("/audit"), {
+            method: "POST",
+            body: formData,
+          });
+          const data = await resp.json();
+
+          if (!resp.ok || data.error) {
+            showBkError(data.error || "Failed to start audit.");
+            bkBtnRun.disabled = false;
+            bkSetStep(2);
+            return;
+          }
+
+          currentJobId = data.job_id;
+          bkLog("✅ Audit started — job ID: " + currentJobId, "log-system");
+          bkLog("Launching headless Chrome + checking Moz cache...", "");
+
+          // Poll for status every 2 seconds
+          pollTimer = setInterval(() => pollStatus(currentJobId), 2000);
+        } catch (err) {
+          showBkError(
+            "Could not connect to server. Is backend_server.py running?",
+          );
+          bkBtnRun.disabled = false;
+          bkSetStep(2);
+        }
+      }
+
+      async function pollStatus(jobId) {
+        try {
+          const resp = await fetch(apiUrl("/status/" + jobId));
+          if (!resp.ok) return;
+          const data = await resp.json();
+
+          // Append new log lines only
+          const newLines = data.logs.slice(lastLogCount);
+          newLines.forEach((line) => {
+            const cls = line.includes("✅")
+              ? "log-good"
+              : line.includes("🚩")
+                ? "log-bad"
+                : line.includes("⚠️")
+                  ? "log-warn"
+                  : line.includes("🔍") ||
+                      line.includes("🗄️") ||
+                      line.includes("🚀")
+                    ? "log-system"
+                    : "";
+            bkLog(line, cls);
+          });
+          lastLogCount = data.logs.length;
+
+          // Update progress bar
+          if (data.total > 0) {
+            const pct = Math.round((data.progress / data.total) * 100);
+            bkProgBar.style.width = pct + "%";
+            bkProgCount.textContent = data.progress + " / " + data.total;
+          }
+
+          // Update live stats
+          bkStats.good = data.good;
+          bkStats.bad = data.flagged;
+          bkStats.warn = data.warn;
+          bkStats.total = data.good + data.flagged + data.warn;
+          document.getElementById("ls-total").textContent = bkStats.total;
+          document.getElementById("ls-good").textContent = data.good;
+          document.getElementById("ls-warn").textContent = data.warn;
+          document.getElementById("ls-bad").textContent = data.flagged;
+
+          // Done
+          if (data.status === "done") {
+            clearInterval(pollTimer);
+            bkProgBar.style.width = "100%";
+            bkProgCount.textContent = data.total + " / " + data.total;
+
+            document.getElementById("res-total").textContent = bkStats.total;
+            document.getElementById("res-good").textContent = data.good;
+            document.getElementById("res-bad").textContent =
+              data.flagged + data.warn;
+
+            bkBtnDownload.href = apiUrl("/download/" + jobId);
+            bkBtnDownload.setAttribute("download", "Backlinks_AUDITED.xlsx");
+            bkResultsCard.style.display = "block";
+            bkSetStep(4);
+          }
+
+          // Error
+          if (data.status === "error") {
+            clearInterval(pollTimer);
+            bkLog(
+              "❌ Audit failed. Check your Moz key and file format.",
+              "log-bad",
+            );
+            showBkError(
+              "Audit failed — check terminal logs above for details.",
+            );
+            bkBtnRun.disabled = false;
+            bkSetStep(2);
+          }
+        } catch (err) {
+          // Server might be temporarily unreachable — keep polling
+        }
+      }
+
+      bkBtnReset.addEventListener("click", () => {
+        if (pollTimer) clearInterval(pollTimer);
+        currentJobId = null;
+        lastLogCount = 0;
+        bkFile = null;
+        bkFileInput.value = "";
+        bkFilePill.classList.remove("show");
+        bkUploadZone.style.display = "";
+        bkProgressCard.style.display = "none";
+        bkResultsCard.style.display = "none";
+        bkTerminal.innerHTML = "";
+        bkProgBar.style.width = "0%";
+        bkProgCount.textContent = "0 / 0";
+        bkStats = { total: 0, good: 0, warn: 0, bad: 0 };
+        ["ls-total", "ls-good", "ls-warn", "ls-bad"].forEach(
+          (id) => (document.getElementById(id).textContent = "0"),
+        );
+        bkMozId.value = "";
+        bkMozSecret.value = "";
+        bkBtnRun.disabled = true;
+        bkSetStep(1);
+      });
+
+      // ── Helpers ────────────────────────────────────────────────
+      function sleep(ms) {
+        return new Promise((r) => setTimeout(r, ms));
+      }
+      function fmtBytes(b) {
+        if (b < 1024) return b + " B";
+        if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+        return (b / (1024 * 1024)).toFixed(1) + " MB";
+      }
+
+      // ══════════════════════════════════════════════════════════════
+      // ── AUTO-DETECT DASHBOARD ─────────────────────────────────────
+      // ══════════════════════════════════════════════════════════════
+      const autoUploadZone = document.getElementById("auto-upload-zone");
+      const autoFileInput = document.getElementById("auto-file-input");
+      const autoFilePill = document.getElementById("auto-file-pill");
+      const autoFileName = document.getElementById("auto-file-name");
+      const autoFileMeta = document.getElementById("auto-file-meta");
+      const autoFileClear = document.getElementById("auto-file-clear");
+
+      const autoDetectedCard = document.getElementById("auto-detected-card");
+      const autoDetectIcon = document.getElementById("auto-detect-icon");
+      const autoDetectName = document.getElementById("auto-detect-name");
+      const autoDetectMeta = document.getElementById("auto-detect-meta");
+      const autoDetectStatus = document.getElementById("auto-detect-status");
+      const autoUnsupported = document.getElementById("auto-unsupported-warn");
+      const autoBtnRun = document.getElementById("auto-btn-run");
+
+      const autoProgressCard = document.getElementById("auto-progress-card");
+      const autoProgBar = document.getElementById("auto-prog-bar");
+      const autoProgCount = document.getElementById("auto-prog-count");
+      const autoTerminal = document.getElementById("auto-terminal");
+
+      const autoResultsCard = document.getElementById("auto-results-card");
+      const autoBtnDownload = document.getElementById("auto-btn-download");
+      const autoBtnReset = document.getElementById("auto-btn-reset");
+
+      let autoFile = null;
+      let autoFileId = null;
+      let autoJobId = null;
+      let autoPoll = null;
+      let autoLogCount = 0;
+
+      // Method icon mapping
+      const methodIcons = {
+        "Blog Bookmarking": "🔖",
+        "Guest Posting": "✍️",
+        "Web 2.0": "🌐",
+        "Profile Links": "👤",
+        "Article Submission": "📄",
+        "Forum Posting": "💬",
+      };
+
+      // ── API Base URL — works on both localhost AND ngrok ──────────
+      // When accessed via ngrok, window.location.origin = https://xxxx.ngrok-free.app
+      // When accessed locally, window.location.origin = http://localhost:8080
+      const API_BASE = window.location.origin;
+
+      function apiUrl(path) {
+        return API_BASE + path;
+      }
+
+      // ── Upload zone interactions ───────────────────────────────────
+      autoUploadZone.addEventListener("click", () => autoFileInput.click());
+      autoUploadZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        autoUploadZone.classList.add("dragover");
+      });
+      autoUploadZone.addEventListener("dragleave", () =>
+        autoUploadZone.classList.remove("dragover"),
+      );
+      autoUploadZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        autoUploadZone.classList.remove("dragover");
+        if (e.dataTransfer.files.length)
+          autoHandleFile(e.dataTransfer.files[0]);
+      });
+      autoFileInput.addEventListener("change", (e) => {
+        if (e.target.files.length) autoHandleFile(e.target.files[0]);
+      });
+
+      autoFileClear.addEventListener("click", autoResetAll);
+
+      function autoHandleFile(file) {
+        if (!file.name.endsWith(".xlsx")) {
+          alert("Please upload an .xlsx file.");
+          return;
+        }
+        autoFile = file;
+        autoFileName.textContent = file.name;
+        autoFileMeta.textContent = "Analysing sheet...";
+        autoFilePill.style.display = "flex";
+        autoUploadZone.style.display = "none";
+
+        // Call /detect to auto-identify the method
+        const formData = new FormData();
+        formData.append("file", file);
+
+        fetch(apiUrl("/detect"), { method: "POST", body: formData })
+          .then((r) => {
+            if (!r.ok) throw new Error("Server returned " + r.status);
+            return r.json();
+          })
+          .then((data) => {
+            if (data.error) {
+              alert("Could not analyse sheet: " + data.error);
+              autoResetAll();
+              return;
+            }
+            autoFileId = data.file_id;
+            autoFileMeta.textContent =
+              fmtBytes(file.size) + " • " + data.total_rows + " backlinks";
+
+            renderDetectedCard(data);
+            autoDetectedCard.style.display = "block";
+          })
+          .catch((err) => {
+            console.error("Detect error:", err);
+            alert(
+              "Error: " +
+                err.message +
+                "\n\nCheck browser console for details.",
+            );
+            autoResetAll();
+          });
+      }
+
+      // Build the detected-methods card based on /detect response
+      function renderDetectedCard(data) {
+        const methods = data.methods || [];
+        const isMixed = data.is_mixed;
+        const supported = data.has_supported;
+        const totalRows = data.total_rows;
+
+        // Build the methods list
+        let methodsHTML = "";
+        methods.forEach((m) => {
+          const icon = methodIcons[m.name] || "📋";
+          const badge = m.supported
+            ? '<span class="detect-badge s-supported">● Supported</span>'
+            : '<span class="detect-badge s-unsupported">Soon</span>';
+          methodsHTML += `
+            <div class="method-row">
+              <div class="method-row-icon">${icon}</div>
+              <div class="method-row-info">
+                <div class="method-row-name">${escapeHtml(m.name)}</div>
+                <div class="method-row-count">${m.count} row${m.count !== 1 ? "s" : ""}</div>
+              </div>
+              ${badge}
+            </div>
+          `;
+        });
+
+        // Build the picker (if mixed) or single button
+        let pickerHTML = "";
+        if (isMixed && supported) {
+          // Show picker with supported-only vs all options
+          const supportedMethods = methods.filter((m) => m.supported);
+          const supportedCount = supportedMethods.reduce(
+            (s, m) => s + m.count,
+            0,
+          );
+          const unsupportedCount = totalRows - supportedCount;
+
+          pickerHTML = `
+            <div class="picker-label">What would you like to audit?</div>
+            <label class="radio-option">
+              <input type="radio" name="audit-scope" value="supported" checked>
+              <div>
+                <div class="radio-title">Audit only supported types (${supportedCount} rows)</div>
+                <div class="radio-desc">${unsupportedCount} unsupported row${unsupportedCount !== 1 ? "s" : ""} will be skipped and marked in the report.</div>
+              </div>
+            </label>
+            <label class="radio-option">
+              <input type="radio" name="audit-scope" value="all">
+              <div>
+                <div class="radio-title">Audit all ${totalRows} rows</div>
+                <div class="radio-desc">Unsupported types will still be flagged but auto-checked as best we can.</div>
+              </div>
+            </label>
+          `;
+        } else if (!supported) {
+          pickerHTML = `
+            <div style="
+              margin-top: 14px;
+              padding: 12px 14px;
+              background: #fff4e6;
+              border: 1px solid #ffc066;
+              border-radius: 6px;
+              font-size: 13px;
+              color: #663c00;
+            ">
+              ⚠️ <strong>None of these methods are supported yet.</strong>
+              Currently only <em>Blog Bookmarking</em> audits are available.
+              More methods coming soon — try uploading a Blog Bookmarking sheet.
+            </div>
+          `;
+        }
+
+        // Build project info grid — green if present, red if missing
+        const makeField = (label, icon, arr, fieldId, placeholder) => {
+          if (arr && arr.length > 0) {
+            const tags = arr
+              .map(
+                (v) =>
+                  `<span class="project-tag present">${escapeHtml(String(v))}</span>`,
+              )
+              .join("");
+            return `
+              <div class="project-info-item">
+                <div class="project-info-label">
+                  ${icon} ${label}
+                  <span class="field-badge present">✓ Present</span>
+                </div>
+                <div class="project-info-tags">${tags}</div>
+              </div>`;
+          } else {
+            return `
+              <div class="project-info-item missing">
+                <div class="project-info-label">
+                  ${icon} ${label}
+                  <span class="field-badge missing">✗ Missing</span>
+                </div>
+                <input
+                  type="text"
+                  id="${fieldId}"
+                  placeholder="${placeholder}"
+                  class="meta-input"
+                />
+              </div>`;
+          }
+        };
+
+        const projectInfoHTML = `
+          <div class="project-info-grid">
+            ${makeField("Project / Website", "🏢", data.projects, "field-project", "e.g. SKIL Travel")}
+            ${makeField("Project ID", "🆔", data.project_ids, "field-proj-id", "e.g. P001")}
+            ${makeField("Project Manager", "👔", data.managers, "field-manager", "e.g. Nitish Choudhary")}
+            ${makeField("Team Lead", "🧑‍💼", data.team_leads, "field-teamlead", "e.g. Tijeet Singh")}
+            <div class="project-info-item" style="grid-column: 1 / -1;">
+              <div class="project-info-label">
+                👥 Employees
+                ${
+                  data.employees && data.employees.length > 0
+                    ? '<span class="field-badge present">✓ Present</span>'
+                    : '<span class="field-badge missing">✗ Missing</span>'
+                }
+              </div>
+              <div class="project-info-tags">
+                ${
+                  data.employees && data.employees.length > 0
+                    ? data.employees
+                        .map(
+                          (v) =>
+                            `<span class="project-tag present">${escapeHtml(String(v))}</span>`,
+                        )
+                        .join("")
+                    : '<span class="project-tag missing-tag">Not found in sheet</span>'
+                }
+              </div>
+            </div>
+          </div>
+        `;
+
+        // ── Contact Details Section ───────────────────────────────
+        // Build person cards for Manager, Team Lead, and Employees
+        const makeContactCard = (role, name, idPrefix) => `
+          <div class="contact-person-card">
+            <div class="contact-person-header">
+              <span class="contact-person-role">${role}</span>
+              <span class="contact-person-name">${name || "Unknown"}</span>
+            </div>
+            <div class="contact-fields">
+              <div class="contact-field">
+                <label>📱 Telegram Chat ID</label>
+                <input type="text" id="${idPrefix}-telegram"
+                  placeholder="e.g. 123456789"
+                  value="${role === "Team Lead" ? "6595431574" : role === "Manager" ? "702339188" : ""}"
+                />
+              </div>
+              <div class="contact-field">
+                <label>📧 Email Address</label>
+                <input type="email" id="${idPrefix}-email"
+                  placeholder="e.g. name@company.com" />
+              </div>
+            </div>
+          </div>`;
+
+        // Manager card
+        const managerName = (data.managers && data.managers[0]) || "";
+        const managerCard = makeContactCard(
+          "Manager",
+          managerName || "Not specified",
+          "contact-manager",
+        );
+
+        // Team Lead card
+        const teamLeadName = (data.team_leads && data.team_leads[0]) || "";
+        const teamLeadCard = makeContactCard(
+          "Team Lead",
+          teamLeadName || "Not specified",
+          "contact-teamlead",
+        );
+
+        // Employee cards (one per employee)
+        let employeeCards = "";
+        if (data.employees && data.employees.length > 0) {
+          data.employees.forEach((emp, idx) => {
+            employeeCards += makeContactCard(
+              "Employee",
+              emp,
+              `contact-emp-${idx}`,
+            );
+          });
+        } else {
+          employeeCards = makeContactCard(
+            "Employee",
+            "Unknown",
+            "contact-emp-0",
+          );
+        }
+
+        const contactSectionHTML = `
+          <div class="contact-section">
+            <div class="contact-section-title">
+              📬 Notification Details — Telegram &amp; Email
+            </div>
+
+            <div class="telegram-instructions">
+              <div class="tg-instruction-title">📱 How to receive Telegram notifications</div>
+              <div class="tg-steps">
+                <div class="tg-step">
+                  <span class="tg-step-num">1</span>
+                  <span>Open Telegram and search <strong>@seoaudit_TJ_bot</strong></span>
+                </div>
+                <div class="tg-step">
+                  <span class="tg-step-num">2</span>
+                  <span>Press <strong>Start</strong> to activate the bot</span>
+                </div>
+                <div class="tg-step">
+                  <span class="tg-step-num">3</span>
+                  <span>Search <strong>@userinfobot</strong> → send <code>/start</code> → copy your Chat ID</span>
+                </div>
+                <div class="tg-step">
+                  <span class="tg-step-num">4</span>
+                  <span>Paste your Chat ID in the field below</span>
+                </div>
+              </div>
+            </div>
+
+            <div style="font-size:12px;color:var(--muted);margin-bottom:12px;margin-top:8px;">
+              Team Lead and Manager Telegram IDs are pre-filled. Add emails optionally.
+            </div>
+            ${managerCard}
+            ${teamLeadCard}
+            ${employeeCards}
+          </div>
+        `;
+
+        // Section title
+        const titleText = isMixed
+          ? "Mixed activities detected"
+          : "Detected method";
+
+        autoDetectedCard.innerHTML = `
+          <div style="margin-bottom: 16px;">
+            <div class="detected-label">${titleText}</div>
+          </div>
+          <div class="methods-list">
+            ${methodsHTML}
+          </div>
+          ${projectInfoHTML}
+          ${contactSectionHTML}
+          ${pickerHTML}
+          <button
+            class="btn-primary"
+            id="auto-btn-run"
+            style="width: 100%; margin-top: 18px;"
+            ${supported ? "" : "disabled"}
+          >
+            <span>⚡</span>
+            <span>Run Audit</span>
+          </button>
+        `;
+
+        // Re-bind the run button (since innerHTML replaced it)
+        document
+          .getElementById("auto-btn-run")
+          .addEventListener("click", () => {
+            // Read the picker choice
+            let scope = "supported";
+            const radios = document.querySelectorAll(
+              'input[name="audit-scope"]',
+            );
+            radios.forEach((r) => {
+              if (r.checked) scope = r.value;
+            });
+
+            // Build filter_methods param
+            let filterStr = "all";
+            if (scope === "supported") {
+              const supportedNames = methods
+                .filter((m) => m.supported)
+                .map((m) => m.name);
+              filterStr = supportedNames.join(",");
+            }
+            runAutoAudit(filterStr);
+          });
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      // ── Run audit (now takes filterStr) ────────────────────────────
+      function runAutoAudit(filterStr) {
+        if (!autoFileId) return;
+
+        autoTerminal.innerHTML = "";
+        autoProgBar.style.width = "0%";
+        autoProgCount.textContent = "0 / 0";
+        autoLogCount = 0;
+        autoJobId = null;
+        if (autoPoll) clearInterval(autoPoll);
+
+        autoProgressCard.style.display = "block";
+        autoResultsCard.style.display = "none";
+        const runBtn = document.getElementById("auto-btn-run");
+        if (runBtn) runBtn.disabled = true;
+        autoLog("🚀 Starting audit...", "log-system");
+        if (filterStr && filterStr !== "all") {
+          autoLog("📋 Filter: only auditing — " + filterStr, "log-system");
+        }
+
+        const formData = new FormData();
+        formData.append("file_id", autoFileId);
+        formData.append("filter_methods", filterStr || "all");
+
+        // Pass project meta fields
+        const fieldMap = {
+          "field-project": "meta_project",
+          "field-proj-id": "meta_project_id",
+          "field-manager": "meta_manager",
+          "field-teamlead": "meta_teamlead",
+        };
+        for (const [elemId, paramName] of Object.entries(fieldMap)) {
+          const el = document.getElementById(elemId);
+          if (el && el.value.trim()) {
+            formData.append(paramName, el.value.trim());
+          }
+        }
+
+        // Collect contact details (Telegram + Email)
+        const contacts = [];
+        const personIds = [
+          { prefix: "contact-manager", role: "Manager" },
+          { prefix: "contact-teamlead", role: "Team Lead" },
+        ];
+        let empIdx = 0;
+        while (document.getElementById(`contact-emp-${empIdx}-telegram`)) {
+          personIds.push({ prefix: `contact-emp-${empIdx}`, role: "Employee" });
+          empIdx++;
+        }
+        personIds.forEach(({ prefix, role }) => {
+          const tg = document.getElementById(`${prefix}-telegram`);
+          const email = document.getElementById(`${prefix}-email`);
+          if (tg || email) {
+            contacts.push({
+              role,
+              telegram: tg ? tg.value.trim() : "",
+              email: email ? email.value.trim() : "",
+            });
+          }
+        });
+        if (contacts.length > 0) {
+          formData.append("contacts", JSON.stringify(contacts));
+        }
+
+        fetch(apiUrl("/audit"), { method: "POST", body: formData })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.error) {
+              autoLog("❌ " + data.error, "log-bad");
+              if (runBtn) runBtn.disabled = false;
+              return;
+            }
+            autoJobId = data.job_id;
+            autoLog("✅ Job started — " + autoJobId, "log-system");
+            autoPoll = setInterval(autoPollStatus, 2000);
+          })
+          .catch(() => {
+            autoLog("❌ Could not start audit.", "log-bad");
+            if (runBtn) runBtn.disabled = false;
+          });
+      }
+
+      function autoPollStatus() {
+        if (!autoJobId) return;
+        fetch(apiUrl("/status/" + autoJobId))
+          .then((r) => r.json())
+          .then((data) => {
+            // Append new logs
+            const newLines = data.logs.slice(autoLogCount);
+            newLines.forEach((line) => {
+              const cls = line.includes("✅")
+                ? "log-good"
+                : line.includes("🚩")
+                  ? "log-bad"
+                  : line.includes("⚠️")
+                    ? "log-warn"
+                    : line.includes("🚀") ||
+                        line.includes("🔍") ||
+                        line.includes("🗄️") ||
+                        line.includes("📋")
+                      ? "log-system"
+                      : "";
+              autoLog(line, cls);
+            });
+            autoLogCount = data.logs.length;
+
+            // Progress bar
+            if (data.total > 0) {
+              const pct = Math.round((data.progress / data.total) * 100);
+              autoProgBar.style.width = pct + "%";
+              autoProgCount.textContent = data.progress + " / " + data.total;
+            }
+
+            // Live stats
+            document.getElementById("auto-stat-total").textContent =
+              data.good + data.flagged + data.warn;
+            document.getElementById("auto-stat-good").textContent = data.good;
+            document.getElementById("auto-stat-warn").textContent = data.warn;
+            document.getElementById("auto-stat-bad").textContent = data.flagged;
+
+            // Done
+            if (data.status === "done") {
+              clearInterval(autoPoll);
+              autoProgBar.style.width = "100%";
+              const total = data.good + data.flagged + data.warn;
+              autoProgCount.textContent = total + " / " + total;
+              document.getElementById("auto-res-total").textContent = total;
+              document.getElementById("auto-res-good").textContent = data.good;
+              document.getElementById("auto-res-bad").textContent =
+                data.flagged + data.warn;
+              autoBtnDownload.href = apiUrl("/download/" + autoJobId);
+              autoResultsCard.style.display = "block";
+            }
+
+            if (data.status === "error") {
+              clearInterval(autoPoll);
+              autoLog("❌ Audit failed — check logs above.", "log-bad");
+              autoBtnRun.disabled = false;
+            }
+          })
+          .catch(() => {});
+      }
+
+      function autoLog(text, cls) {
+        const div = document.createElement("div");
+        div.className = "log-line" + (cls ? " " + cls : "");
+        div.textContent = text;
+        autoTerminal.appendChild(div);
+        autoTerminal.scrollTop = autoTerminal.scrollHeight;
+      }
+
+      autoBtnReset.addEventListener("click", autoResetAll);
+
+      function autoResetAll() {
+        if (autoPoll) clearInterval(autoPoll);
+        autoFile = null;
+        autoFileId = null;
+        autoJobId = null;
+        autoLogCount = 0;
+        autoFileInput.value = "";
+        autoFilePill.style.display = "none";
+        autoUploadZone.style.display = "";
+        autoDetectedCard.style.display = "none";
+        autoProgressCard.style.display = "none";
+        autoResultsCard.style.display = "none";
+        autoTerminal.innerHTML = "";
+        autoProgBar.style.width = "0%";
+        autoBtnRun.disabled = true;
+        [
+          "auto-stat-total",
+          "auto-stat-good",
+          "auto-stat-warn",
+          "auto-stat-bad",
+        ].forEach((id) => (document.getElementById(id).textContent = "0"));
+      }
+    </script>
+  </body>
+</html>
