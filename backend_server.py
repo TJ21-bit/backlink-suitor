@@ -1,28 +1,49 @@
 """
 ╔══════════════════════════════════════════════════════════╗
-║         BACKLINK AUDITOR — Flask Backend Server v3       ║
+║         BACKLINK AUDITOR — Flask Backend Server v4       ║
 ╚══════════════════════════════════════════════════════════╝
 
-HOW TO RUN:
-    pip install flask
-    python backend_server.py
+RUN LOCALLY:
+    python backend_server.py          → http://localhost:8080
 
-Then open:  http://localhost:5000
+RUN ON RENDER:
+    Deployed with the Dockerfile in this folder (see DEPLOY.md).
 
-All files must be in the same folder:
-    backend_server.py
-    backlink_auditor.py
-    seo_platform.html
+SETTINGS (environment variables, or a local .env file — never commit it):
+    TELEGRAM_TOKEN   Telegram bot token
+    EMAIL_SENDER     Gmail address that sends reports
+    EMAIL_PASSWORD   Gmail App Password
+    APP_PASSWORD     If set, the site asks for this password (username: anything)
+    BROWSER_WORKERS  Parallel headless Chrome tabs (default 3; use 2 on Render Standard)
 """
 
 import os
 import uuid
+import hmac
 import threading
 import requests as req_lib
 from flask import Flask, request, jsonify, send_file, Response
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv(path):
+    """Read KEY=VALUE lines from a local .env file (no extra package needed)."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, val = line.split("=", 1)
+                    os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv(os.path.join(BASE_DIR, ".env"))
+
 # ── Telegram Config ────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = "8959282421:AAEC31APnsh7JNzDCzpTwvJYH-A3fHB3GEk"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
 # Default recipients (always notified)
 DEFAULT_CHAT_IDS = {
@@ -32,6 +53,9 @@ DEFAULT_CHAT_IDS = {
 
 def send_telegram(message: str, chat_ids: dict = None):
     """Send message to specified chat_ids or DEFAULT_CHAT_IDS."""
+    if not TELEGRAM_TOKEN:
+        print("Telegram skipped — TELEGRAM_TOKEN not set")
+        return
     targets = chat_ids if chat_ids else DEFAULT_CHAT_IDS
     url     = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     for chat_id in targets:
@@ -46,10 +70,10 @@ def send_telegram(message: str, chat_ids: dict = None):
 
 
 # ── Email Config ───────────────────────────────────────────────────────────
-# Using Gmail SMTP — set your Gmail address and App Password below
+# Gmail SMTP — set EMAIL_SENDER and EMAIL_PASSWORD (a Gmail App Password)
 # Get App Password: Google Account → Security → 2-Step Verification → App passwords
-EMAIL_SENDER   = "tijeet@88gravity.com"   # ← change to your Gmail
-EMAIL_PASSWORD = "ikuwdhkhnsceqsqb"                                 # ← paste your Gmail App Password here
+EMAIL_SENDER   = os.environ.get("EMAIL_SENDER", "")
+EMAIL_PASSWORD = os.environ.get("EMAIL_PASSWORD", "")
 
 def send_email(to_email: str, subject: str, body: str):
     """Send email via Gmail SMTP."""
@@ -248,9 +272,27 @@ def build_telegram_summary(job_id: str, jobs: dict, filename: str) -> dict:
         "employee_msgs": employee_msgs,
     }
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
 app = Flask(__name__)
+
+# ── Optional password protection (set APP_PASSWORD on Render) ──────────────
+APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
+
+
+@app.before_request
+def require_password():
+    if not APP_PASSWORD or request.path == "/healthz":
+        return None
+    auth = request.authorization
+    if auth and auth.password and hmac.compare_digest(auth.password, APP_PASSWORD):
+        return None
+    return Response("Password required", 401,
+                    {"WWW-Authenticate": 'Basic realm="SEO Platform"'})
+
+
+@app.route("/healthz")
+def healthz():
+    return "ok"
+
 
 # Allow ngrok to bypass the browser warning interstitial
 @app.after_request
@@ -511,7 +553,7 @@ def run_audit_job(job_id, input_path, output_path, moz_key,
     )
 
     cmd = [
-        sys.executable, "backlink_auditor.py",
+        sys.executable, os.path.join(BASE_DIR, "backlink_auditor.py"),
         input_path,
         "--output", output_path,
     ]
@@ -536,6 +578,8 @@ def run_audit_job(job_id, input_path, output_path, moz_key,
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            cwd=BASE_DIR,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
         )
 
         for line in proc.stdout:
@@ -684,14 +728,15 @@ def download(job_id):
 # ── Run ────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import socket
-    # Try port 8080 first, fall back to 5000 if taken
-    port = 8080
-    s = socket.socket()
-    try:
-        s.bind(("", port))
-        s.close()
-    except OSError:
-        port = 5000
+    # PORT env var wins (Render sets it); else try 8080, then 5000
+    port = int(os.environ.get("PORT", 0)) or 8080
+    if "PORT" not in os.environ:
+        s = socket.socket()
+        try:
+            s.bind(("", port))
+            s.close()
+        except OSError:
+            port = 5000
 
     print("\n" + "═" * 52)
     print("   Backlink Auditor v3 — Web UI Server")
