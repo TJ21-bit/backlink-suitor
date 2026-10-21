@@ -1,57 +1,601 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════╗
-║       BACKLINK AUDITOR v3.1 — Local AI Edition           ║
-║  Playwright + Local AI heuristic. No external services.  ║
+║   BACKLINK AUDITOR v4 — Hybrid Engine                    ║
+║   Fast parallel HTTP first, headless browser only when   ║
+║   the page actually needs it. No external services.      ║
 ╚══════════════════════════════════════════════════════════╝
 
 HOW TO RUN:
     python backlink_auditor.py "Tijeet singh.xlsx"
 
 FIRST TIME SETUP (run once):
-    pip install requests beautifulsoup4 openpyxl pandas playwright
+    pip install -r requirements.txt
     python -m playwright install chromium
 
-CHECKS:
-    1. Backlink Live or Dead          — with exact reason
-    2. Target Keyword on page         — anchor, title, body, H1-H3
-    3. Page links back to Project URL — checks <a>, data-attrs, JS, redirects
-    4. AI Content Score (0-10)        — local heuristic (phrases + burstiness)
-    5. DA / SS columns                — blank for now, ready for Moz later
+HOW IT WORKS (same flow as the Laravel CheckBacklinkJob):
+    0. Pre-checks       — empty / invalid URL, self-link, file submissions
+    1. HTTP phase       — 10 parallel plain HTTP requests (fast)
+    2. Smart fallback   — a row goes to the headless browser only if:
+                            • HTTP 401/403/404/429/5xx or connection timeout
+                            • HTML too small / incomplete page
+                            • CAPTCHA / Cloudflare challenge detected
+                            • project domain not in a small page (JS-rendered)
+                            • backlink or keyword not found in raw HTML
+                            • known JS platform (Sngine, Pinterest, Reddit ...)
+    3. Browser phase    — 3 parallel headless Chrome tabs, deep DOM scan
+    4. Last resort      — alternate HTTP client (Safari UA, Bing referer)
+
+CHECKS PER BACKLINK:
+    • Live / dead / blocked / login wall, with exact reason
+    • Soft 403 / 404 / 410 — error code but backlink is on the page
+    • Project URL linked (domain, root domain, exact submitted URL, short links)
+    • rel = dofollow / nofollow / sponsored / ugc, and anchor text
+    • Target keyword (title, meta, anchor, H1-H3, body, JS-rendered text)
+    • Content quality score (0-10) + AI-likelihood % with the signals found
 """
 
 import argparse
 import json
+import math
 import os
+import queue
 import re
 import sys
+import threading
 import time
-from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from urllib.parse import urlparse, urlsplit, urlunsplit, unquote
 
-import requests
 import pandas as pd
+import requests
+import urllib3
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 
-# ── Colors ─────────────────────────────────────────────────────────────────────
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+try:
+    from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+    PLAYWRIGHT_OK = True
+except ImportError:                                  # HTTP-only mode
+    PLAYWRIGHT_OK = False
+
+    class PlaywrightTimeout(Exception):
+        pass
+
+# Flush every print immediately so the web UI's live log keeps up
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 0. CONFIG
+# ══════════════════════════════════════════════════════════════════════════════
+
+HTTP_WORKERS    = int(os.environ.get("HTTP_WORKERS", 10))      # parallel plain-HTTP requests
+BROWSER_WORKERS = int(os.environ.get("BROWSER_WORKERS", 3))    # parallel headless Chrome tabs
+MAX_BODY_BYTES  = 768 * 1024  # stop reading huge pages after this much
+
 CLR_HEADER = "FF1565C0"
 CLR_GREEN  = "FFB9F6CA"
 CLR_RED    = "FFFFCDD2"
 CLR_YELLOW = "FFFFF9C4"
 CLR_BLUE   = "FFE3F2FD"
-CLR_PURPLE = "FFF3E5F5"
 CLR_WHITE  = "FFFFFFFF"
 
+RESULT_COLUMNS = [
+    "Link Status", "Final URL", "Fetch Method", "Keyword Found?",
+    "Project URL Linked?", "Link Rel", "Anchor Text",
+    "Content Quality", "AI Content Score", "AI Signals",
+    "Audit Result", "Flag Reason",
+]
+
+# Main client — looks like Chrome on Windows coming from Google
+MAIN_HEADERS = {
+    "User-Agent"               : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept"                   : "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language"          : "en-US,en;q=0.9",
+    "Accept-Encoding"          : "gzip, deflate",   # no 'br' — requests can't decode it without brotli
+    "Connection"               : "keep-alive",
+    "Referer"                  : "https://www.google.com/",
+    "Cache-Control"            : "max-age=0",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest"           : "document",
+    "Sec-Fetch-Mode"           : "navigate",
+    "Sec-Fetch-Site"           : "cross-site",
+    "Sec-Fetch-User"           : "?1",
+    "sec-ch-ua"                : '"Chromium";v="124", "Google Chrome";v="124"',
+    "sec-ch-ua-mobile"         : "?0",
+    "sec-ch-ua-platform"       : '"Windows"',
+}
+
+# Alternate client — looks like Safari on Mac coming from Bing
+ALT_HEADERS = {
+    "User-Agent"     : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+    "Accept"         : "text/html,application/xhtml+xml",
+    "Accept-Language": "en-GB,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate",
+    "Referer"        : "https://www.bing.com/",
+}
+
+HTTP_CODE_TEXT = {
+    400: "Bad request — URL may be malformed",
+    401: "Login required",
+    403: "Forbidden — bot blocked",
+    404: "Page not found",
+    410: "Page permanently removed",
+    429: "Too many requests — rate limited",
+    500: "Server error",
+    502: "Bad gateway",
+    503: "Service unavailable",
+    508: "Resource limit reached",
+    509: "Bandwidth exceeded",
+}
+
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. PAGE FETCH
+# 1. DOMAIN LISTS
 # ══════════════════════════════════════════════════════════════════════════════
+
+SHORT_URL_DOMAINS = {
+    "bit.ly", "tinyurl.com", "t.co", "t.ly", "goo.gl", "ow.ly", "is.gd",
+    "cutt.ly", "rebrand.ly", "shorturl.at", "tiny.cc", "bl.ink", "buff.ly",
+    "dlvr.it", "fur.ly", "mcaf.ee", "short.io", "soo.gd", "s.id", "v.gd",
+    "clck.ru", "qr.ae", "adf.ly", "bit.do", "rb.gy",
+    "pin.it", "flic.kr", "img.ly",
+}
+
+# Paste/document sites host content — never treat them as redirectors
+PASTE_SITE_DOMAINS = {
+    "justpaste.me", "justpaste.it", "pastebin.com", "paste.ee",
+    "rentry.co", "privatebin.net", "hastebin.com", "dpaste.org",
+}
+
+# Sites that render their content with JavaScript — skip plain HTTP, go
+# straight to the browser (from the Laravel job's list)
+JS_PLATFORM_DOMAINS = {
+    "pearltrees.com", "quora.com", "reddit.com", "pinterest.com", "pinterest.in",
+    "flipboard.com", "scoop.it", "mix.com", "tumblr.com", "bizbuildboom.com",
+    "diigo.com", "globalfreetalk.com", "streetvibex.com", "bondhusova.com",
+    "instaconnect.co", "bookmarkingfree.com", "hasster.com", "logcla.com",
+    "ooyy.com", "cherfanclub.com", "clarinetu.com", "claimajob.com",
+    "livediscovery.com", "freewebmarks.com", "ybookmarking.com", "pikumil.com",
+    "lalinguanostra.com", "yoursocial.it", "yoursocial.it.com", "zirvede.net",
+    "woxmax.com", "freebookmarkingsite.com", "newsocialbookmarkingsite.com",
+    "free-socialbookmarking.com", "social-bookmarkingsites.com",
+    "freebookmarking.site", "bookmarking.win", "bookmark-dofollow.com",
+    "vintfint.com",
+}
+
+# Sngine/PHPDolphin-style platforms that hide outbound links from visitors
+# who are not logged in — an unlinked result there becomes "Manual Check"
+LOW_QUALITY_PLATFORMS = {
+    "fri3nd.me", "followingbook.com", "culturesbook.com", "topkif.nvinio.com",
+    "we2chat.net", "antspride.com", "bytevidsocial.com", "instaconnect.co",
+    "lebanonhub.app", "druzefaces.com", "yoursocial.it.com", "zirvede.net",
+    "pikumil.com", "get2knowgod.com", "mn.co", "imo.net", "whoosmind.com",
+    "ekcochat.com", "stayhomenetwork.com", "purekonect.com",
+}
+
+PDF_HOSTING_DOMAINS = {
+    "dropbox.com", "4shared.com", "slideshare.net", "scribd.com", "issuu.com",
+    "calameo.com", "docdroid.net", "mediafire.com", "docs.google.com",
+    "drive.google.com", "heyzine.com", "files.fm", "smallpdf.com",
+    "flipsnack.com", "yumpu.com", "pubhtml5.com", "joomag.com",
+    "flipbuilder.com", "jumpshare.com", "filestack.com", "box.com",
+    "onedrive.live.com",
+}
+
+IMAGE_HOSTING_DOMAINS = {
+    "behance.net", "flickr.com", "pinterest.com", "instagram.com", "500px.com",
+    "deviantart.com", "imgur.com", "photobucket.com", "unsplash.com", "pexels.com",
+}
+
+FILE_SUBMISSION_TYPES = {"pdf submission", "ppt submission", "image sharing", "video submission"}
+
+# Bot-check / CAPTCHA fingerprints. Weak signals only count on near-empty
+# pages; strong ones count anywhere.
+CHALLENGE_SIGNALS = [
+    "checking your browser", "ddos protection by cloudflare", "cf-browser-verification",
+    "enable javascript and cookies", "just a moment", "cloudflare to restrict access",
+    "__cf_chl", "cf_clearance", "recaptcha", "g-recaptcha", "hcaptcha", "grecaptcha",
+    "your ip has been flagged", "security check to access", "verify you are human",
+    "complete the security check", "automated access", "one more step",
+    "attention required", "bot protection", "please wait", "stackprotectform",
+    "security verification", "please wait while we verify", "verify you're not a robot",
+    "verify you are not a robot", "we verify you", "spinner-border", "not a robot",
+    "human verification", "access denied", "blocked",
+]
+STRONG_CHALLENGE_SIGNALS = {
+    "recaptcha", "g-recaptcha", "hcaptcha", "grecaptcha",
+    "__cf_chl", "cf_clearance", "stackprotectform",
+}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. SMALL HELPERS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def host_of(url: str) -> str:
+    try:
+        host = (urlparse(url).netloc or "").lower().split("@")[-1].split(":")[0]
+        return host[4:] if host.startswith("www.") else host
+    except Exception:
+        return ""
+
+
+def root_of(host: str) -> str:
+    """blog.example.com → example.com (leaves co.uk-style hosts alone)."""
+    parts = host.split(".")
+    if len(parts) < 3:
+        return host
+    if parts[-2] in ("co", "com", "org", "net", "gov", "ac", "edu") and len(parts[-1]) == 2:
+        return ".".join(parts[-3:])
+    return ".".join(parts[-2:])
+
+
+def in_domain_set(url: str, domain_set: set) -> bool:
+    host = host_of(url)
+    if not host:
+        return False
+    if host in domain_set:
+        return True
+    parts = host.split(".")
+    return any(".".join(parts[k:]) in domain_set for k in range(1, len(parts) - 1))
+
+
+def _is_short_url(url: str) -> bool:
+    host = host_of(url)
+    return host not in PASTE_SITE_DOMAINS and host in SHORT_URL_DOMAINS
+
+
+def _is_pdf_url(url: str) -> bool:
+    return in_domain_set(url, PDF_HOSTING_DOMAINS) or url.lower().split("?")[0].endswith(".pdf")
+
+
+def _is_image_url(url: str) -> bool:
+    return in_domain_set(url, IMAGE_HOSTING_DOMAINS)
+
+
+def is_low_quality_platform(url: str) -> bool:
+    return in_domain_set(url, LOW_QUALITY_PLATFORMS)
+
+
+def is_js_platform(url: str) -> bool:
+    return in_domain_set(url, JS_PLATFORM_DOMAINS)
+
+
+def clean_url(url: str) -> str:
+    """Trim and collapse double slashes in the path (https://site.com//post/x)."""
+    url = (url or "").strip()
+    try:
+        p = urlsplit(url)
+        return urlunsplit((p.scheme, p.netloc, re.sub(r"/{2,}", "/", p.path), p.query, p.fragment))
+    except Exception:
+        return url
+
+
+_TAG_STRIP_RE = re.compile(r"<(script|style|noscript)\b.*?</\1\s*>", re.I | re.S)
+
+
+def plain_text_fast(html: str) -> str:
+    text = _TAG_STRIP_RE.sub(" ", html or "")
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def detect_challenge(html: str):
+    """Return the CAPTCHA / bot-check signal found, or None."""
+    if not html:
+        return None
+    lower = html.lower()
+    m = re.search(r"<title[^>]*>(.*?)</title>", lower, re.S)
+    title = m.group(1).strip() if m else ""
+    for signal in ("just a moment", "attention required", "access denied", "security check",
+                   "verify you are human", "human verification", "one more step", "bot protection"):
+        if signal in title:
+            return signal
+    plain_size = len(plain_text_fast(html))
+    for signal in CHALLENGE_SIGNALS:
+        if signal in lower:
+            if plain_size < 1000 or signal in STRONG_CHALLENGE_SIGNALS:
+                return signal
+    return None
+
+
+def looks_like_challenge(html: str):
+    """Stricter check: the page *is* a bot wall (not a normal page with a reCAPTCHA widget)."""
+    signal = detect_challenge(html)
+    if not signal:
+        return None
+    m = re.search(r"<title[^>]*>(.*?)</title>", (html or "").lower(), re.S)
+    title = m.group(1).strip() if m else ""
+    if signal in title or len(plain_text_fast(html)) < 1500:
+        return signal
+    return None
+
+
+def is_login_page(html: str, url: str) -> bool:
+    """True only when the page itself is a login wall (not just a login button)."""
+    if not html:
+        return False
+    url_lower = (url or "").lower()
+    for s in ("/login", "/signin", "/sign-in", "/auth/login", "/account/login", "/users/sign_in"):
+        if url_lower.endswith(s) or f"{s}?" in url_lower:
+            return True
+    soup = BeautifulSoup(html, "html.parser")
+    title = (soup.title.string or "").strip().lower() if soup.title and soup.title.string else ""
+    if title in ("login", "sign in", "signin", "log in", "register", "create account", "join"):
+        return True
+    html_lower = html.lower()
+    has_password = 'type="password"' in html_lower or "type='password'" in html_lower
+    if not has_password:
+        return False
+    for tag in soup(["header", "footer", "nav", "script", "style", "aside"]):
+        tag.decompose()
+    return len(soup.get_text(separator=" ", strip=True)) < 500
+
+
+# ── Short links ──────────────────────────────────────────────────────────────
+# Resolved short links are saved to short_links.json next to this script, so
+# each one is looked up once and reused on every later run. If a shortener
+# blocks the tool, open the short link in your own browser and add a line:
+#     "https://shorturl.at/AbCd1": "https://yoursite.com/the-page/"
+
+SHORT_LINKS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "short_links.json")
+_SHORT_LOCK  = threading.Lock()
+
+
+def _load_short_cache() -> dict:
+    try:
+        with open(SHORT_LINKS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {k.strip(): v.strip() for k, v in data.items() if isinstance(v, str) and v.strip()}
+    except Exception:
+        return {}
+
+
+_SHORT_CACHE = _load_short_cache()
+
+
+def _remember_short(url: str, dest: str):
+    with _SHORT_LOCK:
+        _SHORT_CACHE[url] = dest
+        try:
+            with open(SHORT_LINKS_FILE, "w", encoding="utf-8") as f:
+                json.dump(dict(sorted(_SHORT_CACHE.items())), f, indent=2)
+        except Exception:
+            pass
+
+
+def _short_key(url: str) -> str:
+    return url.strip().rstrip("/")
+
+
+def _resolve_short_url(url: str) -> str:
+    """Follow a short link to its destination; returns the input if it can't."""
+    key = _short_key(url)
+    with _SHORT_LOCK:
+        if key in _SHORT_CACHE:
+            return _SHORT_CACHE[key]
+
+    headers = {k: MAIN_HEADERS[k] for k in ("User-Agent", "Accept", "Accept-Language", "Accept-Encoding")}
+    s = requests.Session()
+    current = url
+    # Hop by hop: read each Location header without loading the destination,
+    # so a slow or bot-blocking destination site can't make the lookup fail.
+    for _ in range(10):
+        try:
+            r = s.get(current, headers=headers, timeout=(4, 8), allow_redirects=False,
+                      verify=False, stream=True)
+        except Exception:
+            break
+        loc = r.headers.get("Location")
+        if r.is_redirect and loc:
+            r.close()
+            current = requests.compat.urljoin(current, loc)
+            if not _is_short_url(current) and host_of(current) != host_of(url):
+                break                                      # left the shortener — done
+            continue
+        # No HTTP redirect — look for meta-refresh / JS redirect in the page
+        try:
+            body = r.raw.read(20000, decode_content=True).decode("utf-8", "replace")
+        except Exception:
+            body = ""
+        r.close()
+        m = (re.search(r'http-equiv=["\']?refresh["\']?[^>]*url=([^"\'>\s]+)', body, re.I)
+             or re.search(r'(?:window\.)?location(?:\.href)?\s*=\s*["\'](https?://[^"\']+)', body, re.I)
+             or re.search(r'<a[^>]+id=["\']?(?:destination|redirect|target)[^>]*href=["\'](https?://[^"\']+)', body, re.I))
+        if m:
+            current = requests.compat.urljoin(current, m.group(1))
+        break
+
+    if host_of(current) and host_of(current) != host_of(url):
+        _remember_short(key, current)
+        return current
+    return url
+
+
+def _resolve_short_in_browser(page, url: str) -> str:
+    """Open a short link in a spare tab and record where it redirects to."""
+    key = _short_key(url)
+    with _SHORT_LOCK:
+        if key in _SHORT_CACHE:
+            return _SHORT_CACHE[key]
+    short_host = host_of(url)
+    seen = []
+
+    def on_request(req):
+        try:
+            if req.is_navigation_request() and host_of(req.url) not in (short_host, "") \
+                    and not _is_short_url(req.url):
+                seen.append(req.url)
+        except Exception:
+            pass
+
+    tab = None
+    try:
+        tab = page.context.new_page()
+        tab.on("request", on_request)
+        try:
+            tab.goto(url, wait_until="domcontentloaded", timeout=25000)
+        except Exception:
+            pass                       # the destination may fail — the redirect is what we need
+        for _ in range(8):             # give interstitial / JS redirects up to ~8s
+            if seen or host_of(tab.url) != short_host:
+                break
+            tab.wait_for_timeout(1000)
+        dest = seen[0] if seen else tab.url
+    except Exception:
+        dest = seen[0] if seen else url
+    finally:
+        try:
+            if tab:
+                tab.close()
+        except Exception:
+            pass
+
+    if dest and host_of(dest) and host_of(dest) != short_host:
+        _remember_short(key, dest)
+        return dest
+    return url
+
+
+_DNS_CACHE = {}
+
+
+def domain_exists_publicly(host: str):
+    """Ask Google public DNS. True = exists, False = NXDOMAIN, None = couldn't tell."""
+    if host in _DNS_CACHE:
+        return _DNS_CACHE[host]
+    answer = None
+    try:
+        r = requests.get("https://dns.google/resolve", params={"name": host, "type": "A"}, timeout=6)
+        data = r.json()
+        if data.get("Status") == 0 and data.get("Answer"):
+            answer = True
+        elif data.get("Status") == 3:
+            answer = False                      # NXDOMAIN — domain doesn't exist
+        elif data.get("Status") == 2:
+            answer = "servfail"                 # domain's name servers are down
+    except Exception:
+        pass
+    _DNS_CACHE[host] = answer
+    return answer
+
+
+def dns_failure(url: str):
+    """(state, error) for a name-resolution failure, split into dead vs local-network block."""
+    host = host_of(url)
+    exists = domain_exists_publicly(host)
+    if exists is True:
+        return "blocked", ("Domain did not resolve on your network, but it exists publicly — "
+                           "ISP/DNS may be blocking it")
+    if exists == "servfail":
+        return "dead", "Domain's name servers are not responding — site is down"
+    if exists is False:
+        return "dead", "Domain does not exist (expired or wrong URL)"
+    return "dead", "Domain not found — URL may be wrong"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. FETCHERS — every fetcher returns the same shape:
+#    { state: live|dead|blocked|login, code, html, final_url, error, method }
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _decode(body: bytes, content_type: str) -> str:
+    m = re.search(r"charset=([\w-]+)", content_type or "", re.I)
+    enc = m.group(1) if m else None
+    if not enc:
+        m = re.search(rb'<meta[^>]+charset=["\']?([\w-]+)', body[:4096], re.I)
+        enc = m.group(1).decode("ascii", "ignore") if m else "utf-8"
+    try:
+        return body.decode(enc, errors="replace")
+    except LookupError:
+        return body.decode("utf-8", errors="replace")
+
+
+def http_fetch(url: str, alt: bool = False) -> dict:
+    res = {"state": "blocked", "code": None, "html": "", "final_url": url,
+           "error": None, "method": "alt-http" if alt else "http"}
+    try:
+        s = requests.Session()
+        s.max_redirects = 8
+        with s.get(url, headers=ALT_HEADERS if alt else MAIN_HEADERS,
+                   timeout=(4, 8) if alt else (6, 12),
+                   allow_redirects=True, verify=False, stream=True) as r:
+            res["code"]      = r.status_code
+            res["final_url"] = r.url or url
+            buf = bytearray()
+            for chunk in r.iter_content(8192):
+                buf.extend(chunk)
+                if len(buf) >= MAX_BODY_BYTES:
+                    break
+            res["html"] = _decode(bytes(buf), r.headers.get("Content-Type", ""))
+    except requests.exceptions.TooManyRedirects:
+        res["error"] = "Too many redirects"
+        return res
+    except requests.exceptions.Timeout:
+        res["error"] = "Connection timeout — site too slow or blocking bots"
+        return res
+    except requests.exceptions.ConnectionError as e:
+        msg = str(e)
+        if any(k in msg for k in ("Name or service not known", "getaddrinfo", "nodename nor servname",
+                                  "NameResolutionError", "No address associated")):
+            res["state"], res["error"] = dns_failure(url)
+        elif "Connection refused" in msg:
+            res["state"], res["error"] = "dead", "Connection refused"
+        else:
+            res["error"] = "Connection closed — server may be overloaded"
+        return res
+    except Exception as e:
+        res["error"] = str(e)[:120]
+        return res
+
+    code = res["code"]
+    if 200 <= code < 300:
+        res["state"] = "live"
+    elif code in (400, 404, 410):
+        res["state"] = "dead"
+        res["error"] = f"HTTP {code} — {HTTP_CODE_TEXT[code]}"
+    else:
+        res["state"] = "blocked"
+        res["error"] = f"HTTP {code} — {HTTP_CODE_TEXT.get(code, 'unexpected response')}"
+    return res
+
+
+def needs_browser_reason(fetch: dict, project_domain: str):
+    """The Laravel job's 'smart Puppeteer fallback' rules. None = HTTP is enough."""
+    code = fetch["code"]
+    html = fetch["html"] or ""
+    if code is None:
+        return None if fetch["state"] == "dead" else (fetch["error"] or "connection error")
+    if code == 410:
+        return None                                   # soft-410 is decided in analysis
+    if not (200 <= code < 300):
+        return f"HTTP {code}"
+    if len(html.strip()) < 1000:
+        return f"HTML too small ({len(html)} bytes)"
+    challenge = detect_challenge(html)
+    if challenge:
+        return f"challenge page: {challenge}"
+    lower = html.lower()
+    plain = plain_text_fast(html)
+    if ("</body>" not in lower and "</html>" not in lower) or len(plain) < 200:
+        return "incomplete page content"
+    if project_domain and project_domain not in lower and len(plain) < 15000:
+        return "JS likely — project domain not in HTML"
+    return None
+
+
+# ── Browser fetch (Playwright) ───────────────────────────────────────────────
 
 def _scroll_page(page):
-    """Quick 2-step scroll to trigger lazy-loaded content."""
     try:
         page.evaluate("""
             async () => {
@@ -67,835 +611,280 @@ def _scroll_page(page):
         pass
 
 
-# ── Known short URL domains ──────────────────────────────────────────────────
-SHORT_URL_DOMAINS = {
-    "bit.ly", "tinyurl.com", "t.co", "t.ly", "goo.gl",
-    "ow.ly", "is.gd", "cutt.ly", "rebrand.ly", "shorturl.at",
-    "tiny.cc", "bl.ink", "buff.ly", "dlvr.it", "fur.ly",
-    "mcaf.ee", "short.io", "soo.gd", "s.id", "v.gd",
-    "clck.ru", "qr.ae", "adf.ly", "bit.do",
-    # Image sharing short URLs
-    "pin.it", "flic.kr", "img.ly",
-}
-
-# Paste/document sites — NOT shorteners, open directly
-# These host actual content, not redirectors
-PASTE_SITE_DOMAINS = {
-    "justpaste.me", "justpaste.it", "pastebin.com", "paste.ee",
-    "rentry.co", "privatebin.net", "hastebin.com", "dpaste.org",
-}
-
-
-def _is_short_url(url: str) -> bool:
-    """Returns True if URL is a known short URL service (not a paste/content site)."""
-    try:
-        domain = urlparse(url).netloc.replace("www.", "").lower()
-        if domain in PASTE_SITE_DOMAINS:
-            return False   # paste sites host content, not redirectors
-        return domain in SHORT_URL_DOMAINS
-    except Exception:
-        return False
-
-
-def _resolve_short_url(url: str) -> str:
-    """
-    Resolve a short URL to its final destination.
-    Tries multiple strategies:
-    1. HEAD request following redirects (fastest)
-    2. GET request with stream=True (catches more redirect types)
-    3. Check response history for intermediate redirects
-    Returns final URL, or original url if all strategies fail.
-    """
-    headers = {
-        "User-Agent"     : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept"         : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept-Encoding": "gzip, deflate, br",
-    }
-    try:
-        session = requests.Session()
-        session.max_redirects = 15
-
-        # Strategy 1: HEAD with redirects
+def _grab_html(page) -> str:
+    html = page.content()
+    for frame in page.frames[1:]:
         try:
-            resp = session.head(url, headers=headers, timeout=10, allow_redirects=True)
-            if resp.url and resp.url.rstrip("/") != url.rstrip("/"):
-                return resp.url
-            # Check redirect history
-            if resp.history:
-                last = resp.history[-1]
-                loc = last.headers.get("Location", "")
-                if loc and loc.startswith("http"):
-                    return loc
+            html += frame.content()
         except Exception:
             pass
-
-        # Strategy 2: GET with stream to avoid downloading full page
-        try:
-            resp = session.get(url, headers=headers, timeout=10,
-                               allow_redirects=True, stream=True)
-            resp.close()
-            if resp.url and resp.url.rstrip("/") != url.rstrip("/"):
-                return resp.url
-            if resp.history:
-                return resp.history[-1].headers.get("Location", url) or url
-        except Exception:
-            pass
-
-    except Exception:
-        pass
-
-    return url
+    return html
 
 
-def _goto(page, url: str) -> dict:
-    """
-    Navigate to URL using a smart two-stage wait.
-    If the URL is a known short URL, resolve it first via HTTP HEAD.
-    Also fixes common URL issues (double slashes).
-
-    Returns { live, code, error, html, final_url, was_short_link }
-    """
-    result = {
-        "live"           : False,
-        "code"           : None,
-        "error"          : None,
-        "html"           : "",
-        "final_url"      : url,
-        "was_short_link" : False,
-    }
-
-    # ── Fix common URL issues ─────────────────────────────────────────────
-    # Fix double slashes after domain e.g. https://instaconnect.co//post/...
-    from urllib.parse import urlsplit, urlunsplit
-    try:
-        parts = urlsplit(url)
-        clean_path = re.sub(r'/{2,}', '/', parts.path)
-        url = urlunsplit((parts.scheme, parts.netloc, clean_path, parts.query, parts.fragment))
-        result["final_url"] = url
-    except Exception:
-        pass
-
-    # ── Pre-resolve short URLs ────────────────────────────────────────────
-    actual_url = url
+def browser_fetch(page, url: str) -> dict:
+    res = {"state": "blocked", "code": None, "html": "", "final_url": url,
+           "error": None, "method": "browser"}
+    actual = url
     if _is_short_url(url):
         resolved = _resolve_short_url(url)
-        if resolved and resolved != url:
-            actual_url               = resolved
-            result["final_url"]      = resolved
-            result["was_short_link"] = True
-            print(f"          🔗 Short URL resolved: {url[:40]} → {resolved[:50]}")
+        if resolved != url:
+            actual = res["final_url"] = resolved
+
+    def finish_live(code):
+        _scroll_page(page)
+        html = _grab_html(page)
+        res["code"], res["final_url"] = code, page.url or actual
+        if is_login_page(html, page.url):
+            res["state"] = "login"
+            res["error"] = "Login required — content hidden behind login wall"
         else:
-            print(f"          🔗 Short URL — trying browser directly: {url[:50]}")
+            res["state"], res["html"] = "live", html
 
     try:
-        # Stage 1: Load the page with a generous timeout, but only wait for DOM ready
-        resp = page.goto(actual_url, wait_until="domcontentloaded", timeout=45000)
+        resp = page.goto(actual, wait_until="domcontentloaded", timeout=45000)
         code = resp.status if resp else None
-        result["code"] = code
-
-        # Stage 2: Try networkidle but only wait 5s max
-        # Many sites never reach true idle due to ads/analytics
         try:
             page.wait_for_load_state("networkidle", timeout=5000)
         except PlaywrightTimeout:
             page.wait_for_timeout(1500)
 
-        # Capture final URL after all redirects
-        try:
-            playwright_final = page.url
-            orig_domain  = urlparse(url).netloc.replace("www.", "").lower()
-            final_domain = urlparse(playwright_final).netloc.replace("www.", "").lower()
-
-            if not result["was_short_link"]:
-                # Not already resolved — check if Playwright followed a redirect
-                result["final_url"] = playwright_final
-                if orig_domain and final_domain and orig_domain != final_domain:
-                    result["was_short_link"] = True
-            else:
-                # Already resolved via HTTP — but update to Playwright's
-                # final URL in case there were more hops after the short link
-                if playwright_final and playwright_final != actual_url:
-                    result["final_url"] = playwright_final
-        except Exception:
-            pass
-
-        # Now extract content
-        def grab_html():
-            html = page.content()
-            for frame in page.frames[1:]:
-                try:
-                    html += frame.content()
-                except Exception:
-                    pass
-            return html
-
-        def is_login_page(html: str, url: str) -> bool:
-            """
-            Detect if the page IS a login wall — meaning the main content
-            is a login/signup form and the actual post is inaccessible.
-            Does NOT flag pages that merely have a login button in their header.
-            """
-            html_lower = html.lower()
-            url_lower  = url.lower()
-
-            # Signal 1: URL itself redirected to a login page
-            # Only flag if the URL changed to contain login/signin
-            login_url_signals = ["/login", "/signin", "/sign-in",
-                                  "/auth/login", "/account/login", "/users/sign_in"]
-            if any(url_lower.endswith(s) or f"{s}?" in url_lower
-                   for s in login_url_signals):
-                return True
-
-            from bs4 import BeautifulSoup as _BS
-            soup = _BS(html, "html.parser")
-
-            # Signal 2: Page title is ONLY about login/register — very specific
-            title = (soup.title.string or "").strip().lower() if soup.title else ""
-            login_only_titles = ["login", "sign in", "signin", "log in",
-                                  "register", "create account", "join"]
-            # Must be EXACTLY a login title, not "Login | Hasster" where content exists
-            if title in login_only_titles:
-                return True
-
-            # Signal 3: The MAIN/ONLY visible content is a login form
-            # Remove header, footer, nav — check if what remains is just a login form
-            for tag in soup(["header", "footer", "nav", "script", "style", "aside"]):
-                tag.decompose()
-
-            main_text = soup.get_text(separator=" ", strip=True).lower()
-
-            # If page has very little text AND has a password field → login wall
-            has_password = (
-                'type="password"' in html_lower or
-                "type='password'" in html_lower
-            )
-            # A real content page will have lots of text
-            # A login wall will have very little
-            if has_password and len(main_text) < 500:
-                return True
-
-            return False
-
-        if code == 200:
-            result["live"] = True
-            _scroll_page(page)
-            html = grab_html()
-
-            # Check if we landed on a login page instead of actual content
-            if is_login_page(html, page.url):
-                result["live"]  = None
-                result["html"]  = ""
-                result["error"] = "Login required — content hidden behind login wall (verify manually)"
-            else:
-                result["html"] = html
-
+        if code is not None and 200 <= code < 300:
+            finish_live(code)
         elif code is None:
-            # Page loaded but no HTTP response captured (client redirect)
-            html = grab_html()
-            if html and len(html) > 1000:
-                result["live"] = True
-                _scroll_page(page)
-                result["html"] = grab_html()
+            html = _grab_html(page)
+            if len(html) > 1000:
+                finish_live(200)
             else:
-                result["live"]  = None
-                result["error"] = "No HTTP status — page may have redirected (verify manually)"
-
-        elif code == 403:
-            # Playwright got 403 — try requests library as fallback
-            # Some sites block headless Chrome fingerprint but allow plain HTTP
-            try:
-                fallback = requests.get(
-                    actual_url,
-                    headers={
-                        "User-Agent"     : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept"         : "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept-Encoding": "gzip, deflate, br",
-                        "Referer"        : "https://www.google.com/",
-                    },
-                    timeout=15,
-                    allow_redirects=True,
-                )
-                if fallback.status_code == 200 and len(fallback.text) > 500:
-                    result["live"]  = True
-                    result["html"]  = fallback.text
-                    result["code"]  = 200
-                    result["final_url"] = fallback.url
-                else:
-                    result["live"]  = None
-                    result["error"] = "HTTP 403 — bot blocked (verify manually)"
-            except Exception:
-                result["live"]  = None
-                result["error"] = "HTTP 403 — bot blocked (verify manually)"
+                res["error"] = "No HTTP status — page may have redirected"
+        elif code in (429, 500, 502, 503, 508, 509):
+            time.sleep(5)                               # temporary — retry once
+            resp2 = page.goto(actual, wait_until="domcontentloaded", timeout=30000)
+            if resp2 and resp2.status == 200:
+                finish_live(200)
+            else:
+                res["code"] = code
+                res["error"] = f"HTTP {code} — {HTTP_CODE_TEXT.get(code, 'server error')}"
         else:
-            # Temporary overload codes — retry once after 5 seconds
-            temporary_codes = {
-                429: "Too many requests — server rate-limited us",
-                500: "Server error — may be temporary",
-                502: "Bad gateway — may be temporary",
-                503: "Service unavailable — may be temporary",
-                508: "Resource limit reached — server temporarily overloaded",
-                509: "Bandwidth exceeded — server temporarily overloaded",
-            }
-            permanent_codes = {
-                404: "Page not found",
-                410: "Page permanently removed",
-                400: "Bad request — URL may be malformed",
-                401: "Login required",
-            }
-
-            if code in temporary_codes:
-                # Wait 5 seconds and retry once
-                import time as _time
-                _time.sleep(5)
-                try:
-                    resp2 = page.goto(actual_url, wait_until="domcontentloaded", timeout=30000)
-                    code2 = resp2.status if resp2 else None
-                    if code2 == 200:
-                        result["live"] = True
-                        _scroll_page(page)
-                        result["html"] = page.content()
-                        result["code"] = 200
-                    else:
-                        result["live"]  = None
-                        result["error"] = f"HTTP {code} — {temporary_codes[code]} (verify manually)"
-                except Exception:
-                    result["live"]  = None
-                    result["error"] = f"HTTP {code} — {temporary_codes[code]} (verify manually)"
-            elif code in permanent_codes:
-                result["error"] = f"HTTP {code} — {permanent_codes[code]}"
-            else:
-                result["error"] = f"HTTP {code} — unexpected response"
+            res["code"] = code
+            res["html"] = _grab_html(page)              # kept for soft-404 checks
+            res["state"] = "dead" if code in (400, 404, 410) else "blocked"
+            res["error"] = f"HTTP {code} — {HTTP_CODE_TEXT.get(code, 'unexpected response')}"
 
     except PlaywrightTimeout:
-        # Initial DOM load failed even with 45s — try ONE more time with the
-        # bare minimum wait condition: 'commit' (just first byte received)
-        try:
-            resp = page.goto(actual_url, wait_until="commit", timeout=20000)
+        try:                                            # last try: first byte only
+            resp = page.goto(actual, wait_until="commit", timeout=20000)
             page.wait_for_timeout(4000)
-            html = page.content()
-            for frame in page.frames[1:]:
-                try:
-                    html += frame.content()
-                except Exception:
-                    pass
-
+            html = _grab_html(page)
             code = resp.status if resp else None
-            result["code"] = code
-
-            # Capture final URL after redirects in fallback path too
-            try:
-                final_url = page.url
-                result["final_url"] = final_url
-                orig_domain  = urlparse(url).netloc.replace("www.", "").lower()
-                final_domain = urlparse(final_url).netloc.replace("www.", "").lower()
-                if orig_domain and final_domain and orig_domain != final_domain:
-                    result["was_short_link"] = True
-            except Exception:
-                pass
-
-            if html and len(html) > 1500:
-                # Got useful content even though page didn't fully load
-                if code == 200 or code is None:
-                    result["live"]  = True
-                    result["html"]  = html
-                    result["error"] = None
-                elif code == 403:
-                    result["live"]  = None
-                    result["error"] = "HTTP 403 — bot blocked (verify manually)"
-                else:
-                    result["error"] = f"HTTP {code} — slow load, partial content only"
+            if len(html) > 1500 and (code is None or 200 <= code < 300):
+                res.update(state="live", code=code or 200, html=html, final_url=page.url)
             else:
-                result["error"] = "Timeout (45s+20s) — site too slow or bot-blocking"
+                res["error"] = "Timeout — site too slow or bot-blocking"
         except Exception:
-            result["error"] = "Timeout (45s) — site too slow or bot-blocking"
+            res["error"] = "Timeout — site too slow or bot-blocking"
 
     except Exception as e:
         err = str(e)
         if "ERR_NAME_NOT_RESOLVED" in err:
-            result["error"] = "Domain not found — URL may be wrong"
+            res["state"], res["error"] = dns_failure(url)
         elif "ERR_CONNECTION_REFUSED" in err:
-            result["error"] = "Connection refused"
-        elif "ERR_CONNECTION_TIMED_OUT" in err or "ERR_TIMED_OUT" in err:
-            result["error"] = "Connection timed out — server unreachable"
-        elif "ERR_CONNECTION_CLOSED" in err:
-            # Server closed connection — often means temporary overload (508/503)
-            # Try once more with requests library as fallback
-            try:
-                import time as _time
-                _time.sleep(3)
-                fallback = requests.get(
-                    actual_url,
-                    headers={
-                        "User-Agent"     : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                        "Accept"         : "text/html,application/xhtml+xml,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Referer"        : "https://www.google.com/",
-                    },
-                    timeout=15,
-                    allow_redirects=True,
-                )
-                if fallback.status_code == 200 and len(fallback.text) > 500:
-                    result["live"]  = True
-                    result["html"]  = fallback.text
-                    result["code"]  = 200
-                    result["final_url"] = fallback.url
-                elif fallback.status_code in (508, 509, 503, 429):
-                    result["live"]  = None
-                    result["error"] = f"HTTP {fallback.status_code} — server temporarily overloaded (verify manually)"
-                else:
-                    result["live"]  = None
-                    result["error"] = f"Connection closed — server may be temporarily overloaded (verify manually)"
-            except Exception:
-                result["live"]  = None
-                result["error"] = "Connection closed — server temporarily overloaded (verify manually)"
-        elif "ERR_SSL" in err:
-            result["error"] = "SSL certificate error"
-        elif "interrupted by another" in err.lower() or "navigation" in err.lower():
-            result["error"] = "Navigation interrupted — site redirects too much"
+            res["state"], res["error"] = "dead", "Connection refused"
+        elif "ERR_SSL" in err or "ERR_CERT" in err:
+            res["error"] = "SSL certificate error"
+        elif "TIMED_OUT" in err:
+            res["error"] = "Connection timed out — server unreachable"
+        elif "ERR_CONNECTION_CLOSED" in err or "ERR_CONNECTION_RESET" in err:
+            res["error"] = "Connection closed — server may be overloaded"
         else:
-            clean = err.replace("Page.goto: ", "").split(" at http")[0]
-            result["error"] = clean[:80] if clean else "Unknown error"
+            res["error"] = err.replace("Page.goto: ", "").split(" at http")[0][:100] or "Unknown error"
 
-    return result
+    return res
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 2. KEYWORD CHECK
+# 4. KEYWORD CHECK
 # ══════════════════════════════════════════════════════════════════════════════
-
-# ── PDF and image hosting domains — keyword check not applicable ─────────────
-PDF_HOSTING_DOMAINS = {
-    "dropbox.com", "4shared.com", "slideshare.net", "scribd.com",
-    "issuu.com", "calameo.com", "docdroid.net", "mediafire.com",
-    "docs.google.com", "drive.google.com",
-    # Flipbook / PDF viewer platforms
-    "heyzine.com", "files.fm", "smallpdf.com", "flipsnack.com",
-    "yumpu.com", "pubhtml5.com", "joomag.com", "flipbuilder.com",
-    # File sharing with PDF preview
-    "jumpshare.com", "filestack.com", "box.com", "onedrive.live.com",
-}
-IMAGE_HOSTING_DOMAINS = {
-    "behance.net", "flickr.com", "pinterest.com", "instagram.com",
-    "500px.com", "deviantart.com", "imgur.com", "photobucket.com",
-    "unsplash.com", "pexels.com",
-}
-
-def _is_pdf_url(url: str) -> bool:
-    domain = urlparse(url).netloc.replace("www.", "").lower()
-    return domain in PDF_HOSTING_DOMAINS or url.lower().endswith(".pdf")
-
-def _is_image_url(url: str) -> bool:
-    domain = urlparse(url).netloc.replace("www.", "").lower()
-    return domain in IMAGE_HOSTING_DOMAINS
-
 
 def check_keyword(html: str, keyword: str) -> tuple:
-    """
-    Returns (found: bool, where: str|None).
-    Checks exact keyword AND common variations:
-    - "skiltravel" also checks "skil travel", "skil-travel"
-    - "seo services delhi" also checks "seoservicesdelhi", "seo-services-delhi"
-    """
-    kw   = keyword.strip().lower()
+    """(found, where). Also tries 'skil travel' / 'skil-travel' / 'skiltravel'."""
+    kw = keyword.strip().lower()
+    if not kw or not html:
+        return False, None
     soup = BeautifulSoup(html, "html.parser")
 
-    # Build all keyword variants to check
     variants = [kw]
     if " " in kw:
-        # Multi-word: also try no-space and hyphenated
-        variants.append(kw.replace(" ", ""))
-        variants.append(kw.replace(" ", "-"))
+        variants += [kw.replace(" ", ""), kw.replace(" ", "-")]
     else:
-        # Single compound word: try with spaces and hyphens at split points
-        # e.g. "skiltravel" → "skil travel", "skil-travel"
         for i in range(3, len(kw) - 2):
-            variants.append(kw[:i] + " " + kw[i:])
-            variants.append(kw[:i] + "-" + kw[i:])
-
-    # Remove duplicates
+            variants += [kw[:i] + " " + kw[i:], kw[:i] + "-" + kw[i:]]
     variants = list(dict.fromkeys(variants))
 
-    # Build text targets once
-    title_text = (soup.title.string or "").lower() if soup.title else ""
+    title_text = (soup.title.string or "").lower() if soup.title and soup.title.string else ""
     meta_tag   = soup.find("meta", attrs={"name": "description"})
     meta_text  = (meta_tag.get("content") or "").lower() if meta_tag else ""
-    body_text  = soup.get_text(separator=" ", strip=True).lower()
     anchors    = [(a.get_text(strip=True) or "").lower() for a in soup.find_all("a")]
-    headings   = [(h.get_text(strip=True).lower(), h.name.upper()) for h in soup.find_all(["h1","h2","h3"])]
+    headings   = [(h.get_text(strip=True).lower(), h.name.upper()) for h in soup.find_all(["h1", "h2", "h3"])]
+    body_text  = soup.get_text(separator=" ", strip=True).lower()
 
-    for variant in variants:
-        if variant in title_text:
+    for v in variants:
+        if v in title_text:
             return True, "Page Title"
-        if variant in meta_text:
+        if v in meta_text:
             return True, "Meta Description"
-        for anchor in anchors:
-            if variant in anchor:
-                return True, "Anchor Text"
-        for heading_text, tag_name in headings:
-            if variant in heading_text:
-                return True, tag_name
-        if variant in body_text:
+        if any(v in a for a in anchors):
+            return True, "Anchor Text"
+        for text, tag in headings:
+            if v in text:
+                return True, tag
+        if v in body_text:
             return True, "Page Body"
-
     return False, None
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. PROJECT URL LINK CHECK
+# 5. PROJECT URL LINK CHECK
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _rel_info(rel_values) -> dict:
+    rel = {v.lower() for v in (rel_values or [])}
+    return {
+        "nofollow" : "nofollow" in rel,
+        "sponsored": "sponsored" in rel,
+        "ugc"      : "ugc" in rel,
+        "dofollow" : not ({"nofollow", "sponsored"} & rel),
+        "known"    : True,
+    }
+
+
+UNKNOWN_REL = {"nofollow": False, "sponsored": False, "ugc": False, "dofollow": True, "known": False}
+
 
 def check_project_url_linked(html: str, project_url: str) -> dict:
     """
-    Check if backlink page links to the submitted project URL.
-    Handles: direct links, tracking redirects, data-* attrs,
-    JS-embedded URLs, short URLs in href AND in plain text.
-    Returns { linked, dofollow, link_text, match_type }
+    Does the page link to the project? Returns
+    { linked, rel, link_text, match_type, exact }
+      rel   — dofollow / nofollow / sponsored / ugc info for the matched <a>
+      exact — the submitted URL's path (not just the domain) is on the page
     """
+    empty = {"linked": False, "rel": UNKNOWN_REL, "link_text": "—", "match_type": None, "exact": False}
     if not project_url or not html:
-        return {"linked": False, "dofollow": None, "link_text": "—", "match_type": None}
-
-    from urllib.parse import unquote
+        return empty
 
     soup           = BeautifulSoup(html, "html.parser")
-    project_parsed = urlparse(project_url)
-    project_domain = project_parsed.netloc.replace("www.", "").lower()
-    project_path   = project_parsed.path.rstrip("/").lower()
+    project_domain = host_of(project_url)
+    project_root   = root_of(project_domain)
+    project_path   = urlparse(project_url).path.rstrip("/").lower()
     project_full   = project_url.rstrip("/").lower()
-
+    project_bare   = re.sub(r"^https?://(www\.)?", "", project_full)
     if not project_domain:
-        return {"linked": False, "dofollow": None, "link_text": "—", "match_type": None}
+        return empty
 
-    # ── STAGE 1: Standard <a href=...> tags ─────────────────────────────────
+    html_decoded = unquote(html.lower())
+    hrefs        = [unquote((a.get("href") or "").lower()) for a in soup.find_all("a", href=True)]
+    if project_path and len(project_path) > 1:
+        exact = project_bare in html_decoded or any(project_path in h and project_domain in h for h in hrefs)
+    else:
+        exact = True                                    # homepage — domain is the URL
+
+    def hit(rel, text, match):
+        return {"linked": True, "rel": rel, "link_text": (text or "—")[:80],
+                "match_type": match, "exact": exact}
+
+    unresolved_shorts = []        # short links we couldn't follow over plain HTTP
+
+    def short_points_to_project(short):
+        dest = _resolve_short_url(short)
+        if host_of(dest) == host_of(short):
+            if short not in unresolved_shorts:
+                unresolved_shorts.append(short)
+            return False
+        return project_domain in dest.lower()
+
+    # Stage 1 — real <a href> links
     for a in soup.find_all("a", href=True):
-        raw_href = a.get("href") or ""
-        href     = raw_href.lower()
-        decoded  = unquote(href)
+        raw  = a.get("href") or ""
+        href = unquote(raw.lower())
+        h    = host_of(href)
+        match = None
+        if h == project_domain:
+            match = "Direct link"
+        elif project_root != project_domain and (h == project_root or h.endswith("." + project_root)):
+            match = "Root domain link"
+        elif project_bare and project_bare in href:
+            match = "Via redirect"
+        elif project_domain in href:
+            match = "Domain in link"
+        elif _is_short_url(raw):
+            if short_points_to_project(raw.strip()):
+                match = "Short link (resolved)"
+        if match:
+            return hit(_rel_info(a.get("rel")), a.get_text(strip=True), match)
 
-        href_domain = urlparse(href).netloc.replace("www.", "").lower()
-        href_path   = urlparse(href).path.rstrip("/").lower()
-
-        match_type = None
-        if href_domain == project_domain:
-            match_type = "Direct link"
-        elif project_full in decoded:
-            match_type = "Via redirect"
-        elif project_domain in decoded:
-            match_type = "Domain match"
-        elif project_path and len(project_path) > 3 and href_path == project_path:
-            match_type = "Path match"
-
-        # ── Check if href is a short URL that resolves to project URL ─────
-        if not match_type and _is_short_url(raw_href):
-            resolved = _resolve_short_url(raw_href)
-            if resolved and project_domain in resolved.lower():
-                match_type = "Short link (resolved)"
-
-        if match_type:
-            rel         = a.get("rel") or []
-            is_nofollow = "nofollow" in " ".join(rel).lower()
-            link_text   = a.get_text(strip=True) or "—"
-            return {
-                "linked"    : True,
-                "dofollow"  : not is_nofollow,
-                "link_text" : link_text[:60],
-                "match_type": match_type,
-            }
-
-    # ── STAGE 2: Other attributes that often hold URLs ──────────────────────
+    # Stage 2 — other attributes that carry URLs (iframes, data-href ...)
     for tag in soup.find_all(True):
         for attr in ("data-href", "data-url", "data-link", "data-original-url",
                      "data-target", "src", "data-src"):
             val = tag.get(attr)
-            if val:
-                val_lower   = val.lower()
-                val_decoded = unquote(val_lower)
-                if (project_domain in val_decoded
-                        or project_full in val_decoded):
-                    text = tag.get_text(strip=True) or tag.get("title", "") or "—"
-                    return {
-                        "linked"    : True,
-                        "dofollow"  : True,
-                        "link_text" : text[:60],
-                        "match_type": f"Via {attr}",
-                    }
+            if isinstance(val, str) and project_domain in unquote(val.lower()):
+                return hit(UNKNOWN_REL, tag.get_text(strip=True) or tag.get("title", ""),
+                           f"Via {tag.name} {attr}")
 
-    # ── STAGE 3: Short URLs in plain page text ───────────────────────────────
-    # Handles: "Read More:- https://shorturl.at/LpjC4" where the short URL
-    # resolves to the project URL. Scans entire page text for any short URL
-    # pattern and resolves each one.
+    # Stage 3 — short URLs written as plain text ("Read more: https://bit.ly/x")
     page_text = soup.get_text(separator=" ", strip=True)
-    # Find all URLs in the page text
-    url_pattern = re.compile(
-        r'https?://[^\s<>"\')\]]+',
-        re.IGNORECASE
-    )
-    all_urls_in_text = url_pattern.findall(page_text)
-    for found_url in all_urls_in_text:
-        found_clean = found_url.rstrip(".,;:!?)")  # strip trailing punctuation
-        if _is_short_url(found_clean):
-            resolved = _resolve_short_url(found_clean)
-            if resolved and project_domain in resolved.lower():
-                return {
-                    "linked"    : True,
-                    "dofollow"  : True,
-                    "link_text" : f"Short URL in text → {found_clean}",
-                    "match_type": "Short URL in text (resolved)",
-                }
+    for found in re.findall(r'https?://[^\s<>"\')\]]+', page_text):
+        found = found.rstrip(".,;:!?)")
+        if _is_short_url(found) and short_points_to_project(found):
+            return hit(UNKNOWN_REL, f"Short URL in text → {found}", "Short URL in text (resolved)")
 
-    # ── STAGE 4: Raw HTML scan — full URL anywhere in source ─────────────────
-    html_lower   = html.lower()
-    html_decoded = unquote(html_lower)
+    # Stages 4-5 only count occurrences that are in the markup/scripts, not
+    # mentions a reader sees as plain text (those are not backlinks).
+    text_lower = unquote(page_text.lower())
 
-    if project_full in html_decoded or project_url.lower() in html_decoded:
-        return {
-            "linked"    : True,
-            "dofollow"  : True,
-            "link_text" : "Found in page source",
-            "match_type": "JS / embedded",
-        }
+    def in_markup(needle):
+        return bool(needle) and html_decoded.count(needle) > text_lower.count(needle)
 
-    # ── STAGE 5: Domain-only match in raw HTML ───────────────────────────────
-    if project_domain in html_decoded:
-        idx     = html_decoded.find(project_domain)
-        context = html_decoded[max(0, idx-200):idx+200]
-        link_signals = ["href", "src", "url", "link", "source", "http", "www"]
-        if any(sig in context for sig in link_signals):
-            return {
-                "linked"    : True,
-                "dofollow"  : True,
-                "link_text" : "Domain found in page source",
-                "match_type": "Domain in source",
-            }
+    # Stage 4 — full submitted URL embedded in the source (JS-built links)
+    if in_markup(project_bare):
+        return hit(UNKNOWN_REL, "Found in page source", "JS / embedded")
 
-    # ── STAGE 6: Plain text mention (not a real backlink) ────────────────────
+    # Stage 5 — domain in the source next to link-ish markup
+    if in_markup(project_domain):
+        for m in re.finditer(re.escape(project_domain), html_decoded):
+            context = html_decoded[max(0, m.start() - 200): m.start() + 200]
+            if any(sig in context for sig in ("href", "src=", "url", "http")):
+                return hit(UNKNOWN_REL, "Domain found in page source", "Domain in source")
+
+    # Short links we couldn't follow — the backlink may well be behind them
+    if unresolved_shorts:
+        return {"linked": False, "rel": UNKNOWN_REL, "link_text": ", ".join(unresolved_shorts[:3]),
+                "match_type": "short-unresolved", "exact": exact, "short_urls": unresolved_shorts}
+
+    # Stage 6 — only mentioned as plain text: not a backlink
     if project_domain in page_text.lower():
-        return {
-            "linked"    : False,
-            "dofollow"  : None,
-            "link_text" : "URL mentioned but NOT clickable",
-            "match_type": "text-only",
-        }
+        return {"linked": False, "rel": UNKNOWN_REL, "link_text": "URL mentioned but NOT clickable",
+                "match_type": "text-only", "exact": exact}
 
-    return {"linked": False, "dofollow": None, "link_text": "—", "match_type": None}
-
-    return {"linked": False, "dofollow": None, "link_text": "—", "match_type": None}
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 4. AI CONTENT SCORE — Local heuristic detector (no external service needed)
-# ══════════════════════════════════════════════════════════════════════════════
-
-# Common AI-writing patterns
-AI_PHRASES = [
-    "delve into", "delving into", "navigate the", "navigating the",
-    "in today's digital", "in the realm of", "in the world of",
-    "it's important to note", "it is important to note",
-    "it's worth noting", "it is worth noting",
-    "in conclusion", "to conclude", "in summary",
-    "furthermore", "moreover", "additionally",
-    "first and foremost", "last but not least",
-    "a testament to", "tapestry of", "landscape of",
-    "play a pivotal role", "play a crucial role", "play a key role",
-    "in essence", "in a nutshell",
-    "embark on", "embarking on",
-    "comprehensive guide", "comprehensive overview",
-    "let's explore", "let us explore",
-    "the ever-evolving", "ever-changing",
-    "shed light on", "sheds light on",
-    "underscores the importance", "highlights the importance",
-    "by leveraging", "leveraging the",
-    "intricacies of", "complexities of",
-    "stands out as", "stands as a",
-    "in the digital age", "in this digital era",
-    "transformative", "revolutionary",
-    "seamlessly", "seamless integration",
-    "cutting-edge", "state-of-the-art",
-]
-
-AI_TRANSITION_WORDS = {
-    "furthermore", "moreover", "additionally", "consequently",
-    "therefore", "thus", "hence", "subsequently",
-    "nevertheless", "nonetheless", "however",
-    "specifically", "particularly", "notably",
-}
-
-
-def _extract_page_text(html: str) -> str:
-    """Strip boilerplate from HTML and return clean body text."""
-    soup = BeautifulSoup(html, "html.parser")
-    for tag in soup(["script", "style", "nav", "footer", "header",
-                     "aside", "form", "noscript"]):
-        tag.decompose()
-    text = soup.get_text(separator=" ", strip=True)
-    return " ".join(text.split())
-
-
-def get_ai_score(html: str, ai_page=None) -> dict:
-    """
-    Local AI-detection heuristic. No external service, no API key.
-    Looks for AI-writing fingerprints:
-      1. AI catchphrases (delve into, tapestry, navigate, etc.)
-      2. Overuse of transition words
-      3. Sentence length uniformity (low burstiness)
-      4. Average sentence complexity
-
-    Returns { score_10, ai_pct, label, error }
-    Score: 0% AI = 10/10 (human), 100% AI = 0/10 (likely AI)
-    """
-    result = {"score_10": "—", "ai_pct": None, "label": "—", "error": None}
-
-    if not html:
-        result["error"] = "No content"
-        return result
-
-    text = _extract_page_text(html)
-
-    if len(text) < 100:
-        result["label"]    = "Too short to score"
-        result["score_10"] = "—"
-        return result
-
-    text_lower = text.lower()
-    words      = text_lower.split()
-    word_count = len(words)
-
-    if word_count < 50:
-        result["label"]    = "Too short to score"
-        result["score_10"] = "—"
-        return result
-
-    # ─ Signal 1: AI catchphrases per 1000 words ─────────────────────────────
-    phrase_hits = sum(text_lower.count(p) for p in AI_PHRASES)
-    phrases_per_1k = (phrase_hits / word_count) * 1000
-
-    # ─ Signal 2: Transition word density ────────────────────────────────────
-    transition_hits = sum(1 for w in words if w.strip(".,;:!?") in AI_TRANSITION_WORDS)
-    transitions_per_1k = (transition_hits / word_count) * 1000
-
-    # ─ Signal 3: Sentence length variance (burstiness) ──────────────────────
-    sentences = re.split(r"[.!?]+", text)
-    sentence_lengths = [len(s.split()) for s in sentences if len(s.split()) >= 3]
-
-    if len(sentence_lengths) >= 5:
-        mean_len = sum(sentence_lengths) / len(sentence_lengths)
-        variance = sum((x - mean_len) ** 2 for x in sentence_lengths) / len(sentence_lengths)
-        std_dev  = variance ** 0.5
-        # Low std deviation = AI-like uniformity
-        # Humans: std dev usually 6-15. AI: usually 2-6.
-        burstiness_score = max(0, min(100, (8 - std_dev) * 12))  # higher = more AI-like
-    else:
-        burstiness_score = 30   # neutral
-
-    # ─ Combine signals into AI probability % ────────────────────────────────
-    # Tunable weights:
-    phrase_signal     = min(100, phrases_per_1k * 18)        # 5 phrases/1k → 90
-    transition_signal = min(100, transitions_per_1k * 1.5)   # 30/1k → 45
-
-    ai_pct = (
-        phrase_signal     * 0.45 +
-        burstiness_score  * 0.35 +
-        transition_signal * 0.20
-    )
-    ai_pct = round(max(0.0, min(100.0, ai_pct)), 1)
-
-    score_10 = round(10 - (ai_pct / 10), 1)
-    score_10 = max(0.0, min(10.0, score_10))
-
-    if ai_pct <= 15:
-        label = "Human Written"
-    elif ai_pct <= 35:
-        label = "Mostly Human"
-    elif ai_pct <= 60:
-        label = "Mixed Content"
-    elif ai_pct <= 80:
-        label = "Mostly AI"
-    else:
-        label = "AI Generated"
-
-    result["ai_pct"]   = ai_pct
-    result["score_10"] = score_10
-    result["label"]    = label
-    return result
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 5. AUDIT ONE ROW
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ══════════════════════════════════════════════════════════════════════════════
-# 5b. KNOWN LOW-QUALITY BOOKMARKING PLATFORMS
-# ══════════════════════════════════════════════════════════════════════════════
-# These platforms use Sngine/PHPDolphin scripts and hide outbound links from
-# non-logged-in visitors. Our scraper can't detect the link reliably, but the
-# link likely IS there for logged-in users — so we mark them for manual review
-# instead of falsely flagging as "Not Linked".
-
-LOW_QUALITY_PLATFORMS = {
-    "fri3nd.me", "followingbook.com", "culturesbook.com",
-    "topkif.nvinio.com", "we2chat.net", "antspride.com",
-    "bytevidsocial.com", "instaconnect.co", "lebanonhub.app",
-    "druzefaces.com", "yoursocial.it.com", "zirvede.net",
-    "pikumil.com", "get2knowgod.com",
-    # Community platforms requiring login
-    "mn.co", "network-1194656.mn.co", "janjaonline.mn.co",
-    # Messaging/social apps — profile content hidden without login
-    "imo.net", "whoosmind.com", "ekcochat.com",
-    "stayhomenetwork.com", "purekonect.com",
-}
-
-
-def is_low_quality_platform(url: str) -> bool:
-    """Returns True if URL belongs to a known low-quality or login-walled platform."""
-    try:
-        domain = urlparse(url).netloc.replace("www.", "").lower()
-        # Exact match
-        if domain in LOW_QUALITY_PLATFORMS:
-            return True
-        # Subdomain match — e.g. janjaonline.mn.co → matches mn.co
-        parts = domain.split(".")
-        if len(parts) >= 2:
-            parent = ".".join(parts[-2:])
-            if parent in LOW_QUALITY_PLATFORMS:
-                return True
-        return False
-    except Exception:
-        return False
+    return empty
 
 
 def _deep_retry_project_url(page, project_url: str) -> dict:
-    """
-    Last-resort project URL detection for stubborn community-bookmarking sites
-    where the link loads via AJAX after page render. Performs:
-      1. Extra scroll + wait for AJAX
-      2. Direct DOM query for ALL <a> elements (post-render)
-      3. Check every href, data-* attribute, and the entire rendered page text
-    Returns same shape as check_project_url_linked().
-    """
-    from urllib.parse import unquote
+    """Post-render DOM scan for links injected by AJAX after load."""
+    empty = {"linked": False, "rel": UNKNOWN_REL, "link_text": "—", "match_type": None, "exact": False}
     try:
-        # Force more JS execution time
         page.wait_for_timeout(2500)
-
-        # Aggressive scroll — some sites only load post body on scroll-into-view
         page.evaluate("""
             async () => {
                 const sleep = ms => new Promise(r => setTimeout(r, ms));
-                window.scrollTo(0, 0); await sleep(400);
-                window.scrollTo(0, document.body.scrollHeight / 2); await sleep(500);
-                window.scrollTo(0, document.body.scrollHeight); await sleep(500);
-                window.scrollTo(0, document.body.scrollHeight / 2); await sleep(400);
-                window.scrollTo(0, 0); await sleep(400);
+                for (const f of [0, 0.5, 1, 0.5, 0]) {
+                    window.scrollTo(0, document.body.scrollHeight * f); await sleep(400);
+                }
             }
         """)
         page.wait_for_timeout(1500)
 
-        project_parsed = urlparse(project_url)
-        project_domain = project_parsed.netloc.replace("www.", "").lower()
-        project_full   = project_url.rstrip("/").lower()
-
-        # Direct DOM query — gets links as they exist AFTER all JS has run
+        project_domain = host_of(project_url)
+        project_path   = urlparse(project_url).path.rstrip("/").lower()
         anchors = page.evaluate("""
             () => Array.from(document.querySelectorAll('a')).map(a => ({
                 href: a.href || '',
@@ -903,273 +892,685 @@ def _deep_retry_project_url(page, project_url: str) -> dict:
                 rel : a.getAttribute('rel') || ''
             }))
         """)
-
         for a in anchors:
-            href    = (a.get("href") or "").lower()
-            decoded = unquote(href)
-            href_domain = urlparse(href).netloc.replace("www.", "").lower()
+            href = unquote((a.get("href") or "").lower())
+            if host_of(href) == project_domain or project_domain in href:
+                exact = (not project_path or len(project_path) <= 1) or project_path in href
+                return {"linked": True, "rel": _rel_info((a.get("rel") or "").split()),
+                        "link_text": (a.get("text") or "—")[:80], "match_type": "Deep scan (rendered DOM)",
+                        "exact": exact}
 
-            if (href_domain == project_domain
-                    or project_full in decoded
-                    or project_domain in decoded):
-                is_nofollow = "nofollow" in (a.get("rel") or "").lower()
-                return {
-                    "linked"    : True,
-                    "dofollow"  : not is_nofollow,
-                    "link_text" : (a.get("text") or "—")[:60],
-                    "match_type": "Deep scan",
-                }
-
-        # Also check all data-* attributes via JS
-        data_attr_hits = page.evaluate(f"""
-            () => {{
-                const target = '{project_domain}';
-                const all = document.querySelectorAll('*');
-                const hits = [];
-                for (const el of all) {{
-                    for (const attr of el.attributes) {{
-                        const v = (attr.value || '').toLowerCase();
-                        if (v.includes(target)) {{
-                            hits.push({{tag: el.tagName, attr: attr.name, val: v.slice(0,100), text: (el.innerText||'').slice(0,40)}});
-                            break;
-                        }}
-                    }}
-                    if (hits.length > 3) break;
-                }}
-                return hits;
-            }}
-        """)
-
-        if data_attr_hits:
-            hit = data_attr_hits[0]
-            return {
-                "linked"    : True,
-                "dofollow"  : True,
-                "link_text" : hit.get("text", "—") or "—",
-                "match_type": f"Deep ({hit.get('attr','attr')})",
-            }
-
-        # Final fallback — rendered page source (after JS) contains URL anywhere
-        rendered = page.content().lower()
-        if project_domain in unquote(rendered):
-            return {
-                "linked"    : True,
-                "dofollow"  : True,
-                "link_text" : "Found in rendered page",
-                "match_type": "Deep / rendered",
-            }
-
+        if project_domain in unquote(page.content().lower()):
+            return {"linked": True, "rel": UNKNOWN_REL, "link_text": "Found in rendered page",
+                    "match_type": "Deep scan (rendered source)", "exact": False}
     except Exception:
         pass
+    return empty
 
-    return {"linked": False, "dofollow": None, "link_text": "—", "match_type": None}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. CONTENT QUALITY + AI LIKELIHOOD (ported from the Laravel scoreContent)
+# ══════════════════════════════════════════════════════════════════════════════
+
+AI_PHRASES = [
+    ("delve into", 3), ("delves into", 3), ("delving into", 3),
+    ("in today's", 3), ("in the realm of", 3), ("in the world of", 3),
+    ("in the landscape of", 3), ("navigate the complex", 3),
+    ("multifaceted", 3), ("pivotal role", 3), ("plays a pivotal", 3),
+    ("plays a crucial", 3), ("plays a vital", 3), ("plays a key role", 3),
+    ("it is important to note", 3), ("it is worth noting", 3),
+    ("a testament to", 3), ("to new heights", 3), ("elevate your", 3),
+    ("harness the power", 3), ("tapestry", 3), ("rich tapestry", 3),
+    ("ever-evolving", 3), ("rapidly evolving", 3),
+    ("embark on a journey", 3), ("take a deep dive", 3),
+    ("treasure trove", 3), ("unlock the potential", 3),
+    ("at the forefront", 3), ("game-changer", 3), ("game-changing", 3),
+    ("cutting-edge", 3), ("paradigm shift", 3), ("revolutionize", 3),
+    ("unparalleled", 3), ("meticulously", 3), ("meticulously crafted", 3),
+    ("seamlessly integrate", 3), ("a plethora of", 3), ("a myriad of", 3),
+    ("it goes without saying", 3), ("a wide array of", 3),
+    ("by leveraging", 3), ("by harnessing", 3),
+    ("look no further", 3), ("let's dive into", 3),
+    ("in this blog post", 3), ("dynamic landscape", 3),
+    ("digital landscape", 3), ("synergy", 3), ("synergies", 3),
+    ("furthermore", 2), ("moreover", 2), ("additionally", 2),
+    ("consequently", 2), ("in conclusion", 2), ("to sum up", 2),
+    ("in summary", 2), ("ultimately", 2), ("leverage", 2),
+    ("robust", 2), ("seamless", 2), ("holistic", 2), ("comprehensive", 2),
+    ("paramount", 2), ("pivotal", 2), ("undoubtedly", 2),
+    ("remarkable", 2), ("noteworthy", 2), ("intricate", 2),
+    ("foster", 2), ("cultivate", 2), ("streamline", 2),
+    ("empower", 2), ("facilitate", 2), ("transformative", 2),
+    ("bespoke", 2), ("curated", 2), ("evolving landscape", 2),
+    ("it is essential", 2), ("one of the key", 2), ("one of the most", 2),
+    ("when it comes to", 2), ("whether you are", 2),
+    ("we will explore", 2), ("navigating the", 2),
+    ("state-of-the-art", 2), ("unprecedented", 2),
+    ("crucial", 1), ("vital", 1), ("enhance", 1),
+    ("optimize", 1), ("tailored", 1),
+]
+# Word-start boundary: 'foster' matches 'fostering' but 'thus' won't match 'enthusiast'
+_AI_PHRASE_RES = [(p, w, re.compile(r"\b" + re.escape(p))) for p, w in AI_PHRASES]
+
+AI_FINGERPRINT_WORDS = {
+    "delve", "delves", "delved", "delving", "tapestry", "tapestries", "underscore", "underscores",
+    "elevate", "elevates", "elevated", "elevating", "leverage", "leverages", "leveraged", "leveraging",
+    "harness", "harnesses", "harnessed", "harnessing", "embark", "embarks", "embarked", "embarking",
+    "navigate", "navigates", "navigated", "navigating", "foster", "fosters", "fostered", "fostering",
+    "cultivate", "cultivates", "cultivated", "cultivating", "streamline", "streamlines", "streamlined",
+    "streamlining", "empower", "empowers", "empowered", "empowering", "facilitate", "facilitates",
+    "facilitated", "facilitating", "encompass", "encompasses", "encompassed", "encompassing",
+    "myriad", "plethora", "multitude", "paramount", "pivotal", "robust", "seamless", "holistic",
+    "transformative", "groundbreaking", "revolutionary", "intricate", "multifaceted", "nuanced",
+    "remarkable", "noteworthy", "meticulous", "meticulously", "synergy", "synergies", "synergistic",
+    "bolster", "bolsters", "endeavor", "endeavors", "imperative", "indispensable", "invaluable",
+    "ubiquitous", "showcase", "showcases", "spearhead", "epitome", "quintessential", "moreover",
+    "furthermore", "additionally", "essentially", "fundamentally", "ultimately", "undoubtedly",
+}
+
+TRANSITION_WORDS = [
+    "furthermore", "moreover", "additionally", "consequently", "however", "therefore",
+    "thus", "hence", "in addition", "in contrast", "nonetheless", "nevertheless",
+    "subsequently", "accordingly",
+]
+_TRANSITION_RES = [re.compile(r"\b" + re.escape(t) + r"\b") for t in TRANSITION_WORDS]
+_TRIPLET_RE = re.compile(
+    r"\b\w+(?:ly|ing|ed|tion|ness|ity)?,\s+\b\w+(?:ly|ing|ed|tion|ness|ity)?,?\s+and\s+\b\w+", re.I)
 
 
-def audit_row(row: dict, page, ai_page) -> dict:
-    live_url      = str(row.get("Backlink Live Link",    "") or "").strip()
-    keyword       = str(row.get("Target Keyword",        "") or "").strip()
-    project_url   = str(row.get("Submitted Project Url", "") or "").strip()
-    activity_type = str(row.get("Backlink Activity Type","") or "").strip()
+def _extract_page_text(html: str) -> str:
+    """Body text without scripts, menus, headers and footers."""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]):
+        tag.decompose()
+    return " ".join(soup.get_text(separator=" ", strip=True).split())
 
-    flags, reasons = [], []
 
-    # ── On-site Blog special handling ────────────────────────────────────────
-    # For On-site Blog the URL IS the client's own website — no external
-    # backlink check needed. Just verify page is live and keyword is present.
-    is_onsite_blog = activity_type.lower() == "on-site blog"
+def _count_syllables(word: str) -> int:
+    word = word.lower()
+    if len(word) <= 3:
+        return 1
+    word = re.sub(r"(?:[^laeiouy]es|ed|[^laeiouy]e)$", "", word)
+    word = re.sub(r"^y", "", word)
+    return max(1, len(re.findall(r"[aeiouy]{1,2}", word)))
 
-    # ── Defaults ─────────────────────────────────────────────────────────────
-    link_status  = "⛔ No URL provided"
-    kw_display   = "⛔ N/A"
-    proj_display = "⛔ N/A (on-site blog)" if is_onsite_blog else "⛔ N/A"
-    ai_display   = "⛔ N/A"
-    link_is_bot  = False
-    link_is_dead = False
 
-    if not live_url:
-        flags.append("No URL")
-        reasons.append("No backlink URL provided")
+def score_content(text: str):
+    """
+    Returns { score, quality_label, ai_pct, origin_label, signals } or None
+    if there isn't enough text. score = writing quality 0-10 minus an AI penalty.
+    """
+    text = (text or "").replace("’", "'").replace("‘", "'").strip()
+    tokens = text.split(" ")
+    if len(tokens) > 5000:
+        text = " ".join(tokens[:5000])
+    lower = text.lower()
 
+    words = re.findall(r"\b[a-z']+\b", text, re.I)
+    wc = len(words)
+    if wc < 20:
+        return None
+
+    sentences = [s for s in re.split(r"[.!?]+\s+", text) if s.strip()]
+    sc        = len(sentences)
+    sent_lens = [len([w for w in s.split(" ") if w]) for s in sentences]
+    avg_len   = sum(sent_lens) / sc if sc else 0
+    sent_std  = math.sqrt(sum((l - avg_len) ** 2 for l in sent_lens) / sc) if sc > 1 else 0
+
+    lower_words = [w.lower() for w in words]
+    ttr = len(set(lower_words)) / wc
+    syllables = sum(_count_syllables(w) for w in words)
+    flesch = (206.835 - 1.015 * (wc / sc) - 84.6 * (syllables / wc)) if sc else 0
+
+    bigrams = [lower_words[k] + " " + lower_words[k + 1] for k in range(wc - 1)]
+    bigram_repeat = 1 - len(set(bigrams)) / len(bigrams) if bigrams else 0
+
+    personal_density    = len(re.findall(r"\b(?:i|me|my|we|us|our|you|your)\b", text, re.I)) / wc
+    contraction_density = len(re.findall(r"\b\w+'(?:s|t|re|ve|ll|d|m)\b", text, re.I)) / wc
+
+    burstiness = 0
+    if len(sent_lens) > 3:
+        burstiness = sum(abs(sent_lens[k] - sent_lens[k - 1]) for k in range(1, len(sent_lens))) / (len(sent_lens) - 1)
+
+    em_dash_count   = text.count("—")
+    em_dash_density = em_dash_count / max(1, sc)
+
+    phrase_hits, phrase_weight = [], 0
+    for phrase, weight, rx in _AI_PHRASE_RES:
+        n = len(rx.findall(lower))
+        if n:
+            phrase_hits.append((phrase, n, weight))
+            phrase_weight += n * weight
+    phrase_density = phrase_weight / max(1, wc / 100)
+
+    fingerprint_hits    = [w for w in lower_words if w in AI_FINGERPRINT_WORDS]
+    fingerprint_density = len(fingerprint_hits) / wc * 1000
+
+    transition_density = sum(len(rx.findall(lower)) for rx in _TRANSITION_RES) / max(1, sc)
+    triplet_density    = len(_TRIPLET_RE.findall(text)) / max(1, sc)
+
+    # ── Writing quality (0-10) ──────────────────────────────────────────────
+    def band(value, steps, default):
+        for threshold, pts in steps:
+            if value >= threshold:
+                return pts
+        return default
+
+    len_score  = band(wc, [(600, 2), (300, 1.5), (150, 1), (50, 0.5)], 0)
+    ttr_score  = band(ttr, [(0.55, 2), (0.45, 1.5), (0.35, 1), (0.25, 0.5)], 0)
+    if 50 <= flesch <= 75:
+        read_score = 2
+    elif 35 <= flesch <= 85:
+        read_score = 1.5
+    elif 20 <= flesch <= 95:
+        read_score = 1
     else:
-        # ── Step 1: Fetch backlink page ───────────────────────────────────
-        fetch = _goto(page, live_url)
+        read_score = 0.5
+    var_score  = band(sent_std, [(6, 2), (4, 1.5), (2.5, 1)], 0.5)
+    rep_score  = 2 if bigram_repeat <= 0.05 else 1.5 if bigram_repeat <= 0.10 else 1 if bigram_repeat <= 0.20 else 0.5
+    quality    = min(10, len_score + ttr_score + read_score + var_score + rep_score)
+    q_details  = [
+        f"Words:{wc}({len_score:.1f}/2)", f"Vocab:{ttr*100:.1f}%({ttr_score:.1f}/2)",
+        f"Flesch:{flesch:.1f}({read_score:.1f}/2)", f"SentVariety:σ={sent_std:.1f}({var_score:.1f}/2)",
+        f"Repeat:{bigram_repeat*100:.1f}%({rep_score:.1f}/2)",
+    ]
 
-        link_is_live  = fetch["live"] is True
-        link_is_bot   = fetch["live"] is None
-        link_is_dead  = fetch["live"] is False
-        link_is_login = link_is_bot and "Login required" in (fetch.get("error") or "")
+    # ── AI likelihood ───────────────────────────────────────────────────────
+    ai, signals = 0.0, []
+    ai += min(45, phrase_density * 8)
+    if phrase_hits:
+        phrase_hits.sort(key=lambda h: -(h[1] * h[2]))
+        top = ", ".join(f'"{p}"' + (f"(x{n})" if n > 1 else "") for p, n, _ in phrase_hits[:4])
+        signals.append(f"{len(phrase_hits)} AI phrases: {top}")
+    if sc > 4:
+        if burstiness < 4:
+            ai += 20; signals.append(f"Uniform rhythm(burst={burstiness:.1f})")
+        elif burstiness < 6:
+            ai += 12; signals.append(f"Low rhythm(burst={burstiness:.1f})")
+        elif burstiness < 8:
+            ai += 5
+    if sc > 5:
+        if sent_std < 3:
+            ai += 12; signals.append(f"Low sentence variance(σ={sent_std:.1f})")
+        elif sent_std < 5:
+            ai += 6
+    if transition_density > 0.4:
+        ai += 15; signals.append(f"Excessive transitions({transition_density*100:.0f}%)")
+    elif transition_density > 0.2:
+        ai += 8; signals.append("Heavy transitions")
+    elif transition_density > 0.1:
+        ai += 3
+    if triplet_density > 0.25:
+        ai += 10; signals.append("Parallel triplets")
+    elif triplet_density > 0.12:
+        ai += 5
+    if em_dash_density > 0.5:
+        ai += 8; signals.append(f"Em-dash overuse({em_dash_count})")
+    elif em_dash_density > 0.25:
+        ai += 4
+    if wc > 80:
+        if personal_density < 0.005:
+            ai += 8; signals.append("No personal pronouns")
+        elif personal_density < 0.015:
+            ai += 4
+        if contraction_density < 0.003:
+            ai += 8; signals.append("No contractions")
+        elif contraction_density < 0.008:
+            ai += 3
+    if avg_len > 28:
+        ai += 6; signals.append(f"Long sentences({avg_len:.1f}w)")
+    elif avg_len > 22:
+        ai += 3
+    if fingerprint_hits:
+        ai += min(35, fingerprint_density * 4)
+        uniq = list(dict.fromkeys(fingerprint_hits))[:5]
+        signals.append(f"{len(fingerprint_hits)} fingerprint words: {','.join(uniq)}")
 
-        if link_is_live:
-            if fetch.get("was_short_link"):
-                final_domain = urlparse(fetch["final_url"]).netloc.replace("www.", "")
-                link_status  = f'✅ Live (Short link → {final_domain})'
-            else:
-                link_status = "✅ Live"
-        elif link_is_login:
-            link_status = "⚠️ Login required — content hidden behind login wall"
-        elif link_is_bot:
-            link_status = "⚠️ Verify manually — bot blocked (HTTP 403)"
-        else:
-            link_status = f'❌ {fetch["error"]}' if fetch["error"] else "❌ Dead"
+    ai_pct = max(0.0, min(100.0, 100 / (1 + math.exp(-0.08 * (ai - 35)))))
+    penalty = 4 if ai_pct >= 80 else 3 if ai_pct >= 65 else 2 if ai_pct >= 50 else 1 if ai_pct >= 35 else 0.5 if ai_pct >= 20 else 0
+    score = round(max(0, min(10, quality - penalty)), 1)
+    ai_pct = round(ai_pct)
 
-        if link_is_dead:
-            flags.append("Dead Link")
-            reasons.append(f'Dead link — {fetch["error"]}')
-        if link_is_login:
-            flags.append("Login Wall")
-            reasons.append("Page shows login screen — backlink content not publicly visible, no SEO value")
-
-        # ── Step 2: Keyword check ─────────────────────────────────────────
-        if link_is_dead:
-            kw_display = "⛔ N/A (link dead)"
-        elif link_is_login:
-            kw_display = "⛔ N/A (login required)"
-        elif link_is_bot:
-            kw_display = "⚠️ Verify manually (bot blocked)"
-        elif not keyword:
-            kw_display = "⛔ N/A (no keyword)"
-        elif _is_pdf_url(fetch.get("final_url", live_url)):
-            kw_display = "⛔ N/A (PDF — cannot check keyword in document)"
-        elif _is_image_url(fetch.get("final_url", live_url)):
-            kw_display = "⚠️ Image platform — keyword in image title/desc only"
-            kw_found, kw_where = check_keyword(fetch["html"], keyword)
-            if kw_found:
-                kw_display = f"✅ Yes ({kw_where})"
-        else:
-            # First try on raw HTML
-            kw_found, kw_where = check_keyword(fetch["html"], keyword)
-
-            # If not found — try again using Playwright's fully rendered text
-            # This catches JS-rendered content that BeautifulSoup misses
-            if not kw_found:
-                try:
-                    rendered_text = page.inner_text("body").lower()
-                    if keyword.lower().strip() in rendered_text:
-                        kw_found = True
-                        kw_where = "Page Body (JS rendered)"
-                except Exception:
-                    pass
-
-            if kw_found:
-                kw_display = f"✅ Yes ({kw_where})"
-            else:
-                if is_low_quality_platform(fetch.get("final_url", live_url)):
-                    kw_display = "⚠️ Verify manually (content may be behind login)"
-                else:
-                    kw_display = "❌ Not found"
-                    flags.append("Keyword Missing")
-                    reasons.append(f'"{keyword}" not found on page')
-
-        # ── Step 3: Project URL backlink check ────────────────────────────
-        if is_onsite_blog:
-            proj_display = "⛔ N/A (on-site blog — internal page)"
-        elif link_is_dead:
-            proj_display = "⛔ N/A (link dead)"
-        elif link_is_login:
-            proj_display = "⛔ N/A (login required — content not public)"
-        elif link_is_bot:
-            proj_display = "⚠️ Verify manually (bot blocked)"
-        elif not project_url:
-            proj_display = "⛔ N/A (no project URL)"
-        else:
-            proj = check_project_url_linked(fetch["html"], project_url)
-
-            # If not found on first try, do a deep DOM scan (post-AJAX)
-            # This catches community-bookmarking sites that load the link via JS
-            if not proj["linked"] and proj.get("match_type") != "text-only":
-                deep = _deep_retry_project_url(page, project_url)
-                if deep["linked"]:
-                    proj = deep
-
-            if proj["linked"]:
-                follow_tag   = "Dofollow ✅" if proj["dofollow"] else "Nofollow ⚠️"
-                match_tag    = proj.get("match_type") or "Linked"
-                proj_display = f'✅ {match_tag} ({follow_tag}) — "{proj["link_text"]}"'
-                if not proj["dofollow"]:
-                    reasons.append("Link is Nofollow — less SEO value")
-            elif proj.get("match_type") == "text-only":
-                proj_display = "⚠️ URL mentioned in text but NOT a clickable link"
-                flags.append("Project URL Not a Backlink")
-                reasons.append("Project URL is only plain text — no actual <a> link")
-            elif is_low_quality_platform(fetch.get("final_url", live_url)):
-                # Known Sngine/PHPDolphin clone — link likely hidden from non-logged-in users
-                proj_display = "⚠️ Known low-quality platform — verify manually"
-                reasons.append(
-                    "Backlink is on a Sngine/PHPDolphin-style social platform — "
-                    "outbound link may only be visible to logged-in users, "
-                    "please verify manually"
-                )
-            else:
-                proj_display = "❌ Not linked"
-                flags.append("Project URL Not Linked")
-                reasons.append(f"Page does not link back to project URL")
-
-        # ── Step 4: AI content score ──────────────────────────────────────
-        if link_is_dead:
-            ai_display = "⛔ N/A (link dead)"
-        elif link_is_login:
-            ai_display = "⛔ N/A (login required)"
-        elif link_is_bot:
-            ai_display = "⚠️ Verify manually (bot blocked)"
-        else:
-            ai = get_ai_score(fetch["html"], ai_page)
-            if ai["error"]:
-                ai_display = f'⚠️ Unavailable ({ai["error"]})'
-            else:
-                ai_display = f'{ai["score_10"]}/10 — {ai["label"]} ({ai["ai_pct"]}% AI)'
-                if ai["ai_pct"] is not None and ai["ai_pct"] > 80:
-                    flags.append("High AI Content")
-                    reasons.append(
-                        f'Content is {ai["ai_pct"]}% AI-written (score: {ai["score_10"]}/10)'
-                    )
-
-    # ── Final audit status ────────────────────────────────────────────────────
-    # Use final URL (after redirects) for low-quality check
-    final_check_url = ""
-    try:
-        final_check_url = fetch.get("final_url", live_url) if live_url else ""
-    except Exception:
-        final_check_url = live_url or ""
-
-    is_low_quality = final_check_url and is_low_quality_platform(final_check_url)
-
-    if not live_url:
-        status = "🚩 Flagged"
-    elif link_is_login:
-        status = "🚩 Flagged — Login Wall (zero SEO value)"
-    elif link_is_bot and not flags:
-        status = "⚠️ Manual Check"
-    elif link_is_bot and flags:
-        status = "🚩 Flagged + ⚠️ Manual Check"
-    elif is_low_quality and not flags:
-        status = "⚠️ Manual Check"
-    elif is_low_quality and flags:
-        status = "🚩 Flagged + ⚠️ Manual Check"
-    else:
-        status = "✅ Good" if not flags else "🚩 Flagged"
-
-    # Capture final URL for output (defaults to original if no fetch happened)
-    final_url_output = ""
-    if live_url:
-        try:
-            # 'fetch' only exists if we got past the URL check above
-            final_url_output = fetch.get("final_url", live_url) if fetch.get("was_short_link") else ""
-        except Exception:
-            final_url_output = ""
-
+    quality_label = ("Excellent Quality" if score >= 7.5 else "Good Quality" if score >= 6
+                     else "Average Quality" if score >= 4 else "Low Quality")
+    origin_label  = ("AI Generated" if ai_pct >= 75 else "Likely AI" if ai_pct >= 50
+                     else "Mixed/Uncertain" if ai_pct >= 30 else "Likely Human" if ai_pct >= 15
+                     else "Human Written")
     return {
-        "Link Status"         : link_status,
-        "Final URL"           : final_url_output,
-        "Keyword Found?"      : kw_display,
-        "Project URL Linked?" : proj_display,
-        "AI Content Score"    : ai_display,
-        "Audit Result"        : status,
-        "Flag Reason"         : "; ".join(reasons) if reasons else "All checks passed ✓",
+        "score": score, "quality_label": quality_label, "ai_pct": ai_pct,
+        "origin_label": origin_label,
+        "signals": " | ".join(signals[:4] + q_details)[:500],
     }
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. EXCEL STYLING
+# 7. ANALYSE ONE FETCHED PAGE
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _row_fields(row: dict):
+    return (
+        clean_url(str(row.get("Backlink Live Link", "") or "")),
+        str(row.get("Target Keyword", "") or "").strip(),
+        clean_url(str(row.get("Submitted Project Url", "") or "")),
+        str(row.get("Backlink Activity Type", "") or "").strip(),
+    )
+
+
+def make_result(link_status, audit_result, reason, method="—", **overrides) -> dict:
+    res = {
+        "Link Status"        : link_status,
+        "Final URL"          : "",
+        "Fetch Method"       : method,
+        "Keyword Found?"     : "⛔ N/A",
+        "Project URL Linked?": "⛔ N/A",
+        "Link Rel"           : "",
+        "Anchor Text"        : "",
+        "Content Quality"    : "⛔ N/A",
+        "AI Content Score"   : "⛔ N/A",
+        "AI Signals"         : "",
+        "Audit Result"       : audit_result,
+        "Flag Reason"        : reason,
+    }
+    res.update(overrides)
+    return res
+
+
+METHOD_LABELS = {"http": "HTTP", "alt-http": "HTTP (alt client)", "browser": "Headless browser"}
+
+
+def analyze(row: dict, fetch: dict, page=None, note: str = "") -> dict:
+    live_url, keyword, project_url, activity = _row_fields(row)
+    is_onsite = activity.lower() == "on-site blog"
+    flags, reasons = [], []
+    manual = []                     # things a person must confirm (→ Manual Check, not Flagged)
+
+    state     = fetch["state"]
+    html      = fetch.get("html") or ""
+    final_url = fetch.get("final_url") or live_url
+    method    = METHOD_LABELS.get(fetch["method"], fetch["method"]) + (f" — {note}" if note else "")
+    soft_note = None
+    proj      = None
+
+    # Soft 404/410: server sends an error code but the backlink is on the page
+    if state == "dead" and html and project_url and not is_onsite:
+        proj = check_project_url_linked(html, project_url)
+        if proj["linked"]:
+            state, soft_note = "live", f"Soft {fetch['code']} — server returns an error code but the backlink is on the page"
+        else:
+            proj = None
+    if state == "live" and is_login_page(html, final_url):
+        state = "login"
+
+    redirected = host_of(final_url) and host_of(final_url) != host_of(live_url)
+    final_url_out = final_url if redirected else ""
+
+    # ── Link status ─────────────────────────────────────────────────────────
+    if state == "live":
+        link_status = "✅ Live"
+        if redirected:
+            link_status += f" (redirect → {host_of(final_url)})"
+        if soft_note:
+            link_status += f" — Soft {fetch['code']}"
+            reasons.append(soft_note)
+    elif state == "login":
+        link_status = "⚠️ Login required — content hidden behind login wall"
+        flags.append("Login Wall")
+        reasons.append("Page shows a login screen — backlink not publicly visible, no SEO value")
+    elif state == "blocked":
+        link_status = f"⚠️ Verify manually — {fetch.get('error') or 'bot blocked'}"
+    else:
+        link_status = f"❌ {fetch.get('error') or 'Dead'}"
+        flags.append("Dead Link")
+        reasons.append(f"Dead link — {fetch.get('error') or 'page not reachable'}")
+
+    na = {"dead": "⛔ N/A (link dead)", "login": "⛔ N/A (login required)",
+          "blocked": "⚠️ Verify manually (blocked)"}.get(state)
+
+    kw_display = proj_display = na or ""
+    rel_display = anchor_display = ai_signals = ""
+    quality_display = ai_display = na or ""
+    kw_found = True
+    proj_needs_retry = False
+    content = None
+
+    if state == "live":
+        # ── Keyword ─────────────────────────────────────────────────────────
+        if not keyword:
+            kw_display = "⛔ N/A (no keyword)"
+        elif _is_pdf_url(final_url):
+            kw_display = "⛔ N/A (PDF — cannot check keyword in document)"
+        else:
+            kw_found, kw_where = check_keyword(html, keyword)
+            if not kw_found and page is not None:
+                try:
+                    if keyword.lower() in page.inner_text("body").lower():
+                        kw_found, kw_where = True, "Page Body (JS rendered)"
+                except Exception:
+                    pass
+            if kw_found:
+                kw_display = f"✅ Yes ({kw_where})"
+            elif _is_image_url(final_url):
+                kw_display = "⚠️ Image platform — keyword only in image title/description"
+            elif is_low_quality_platform(final_url):
+                kw_display = "⚠️ Verify manually (content may be behind login)"
+            else:
+                kw_display = "❌ Not found"
+                flags.append("Keyword Missing")
+                reasons.append(f'"{keyword}" not found on page')
+
+        # ── Project URL ─────────────────────────────────────────────────────
+        if is_onsite:
+            proj_display = "⛔ N/A (on-site blog — internal page)"
+        elif not project_url:
+            proj_display = "⛔ N/A (no project URL)"
+        else:
+            if proj is None:
+                proj = check_project_url_linked(html, project_url)
+            if not proj["linked"] and proj["match_type"] != "text-only" and page is not None:
+                deep = _deep_retry_project_url(page, project_url)
+                if deep["linked"]:
+                    proj = deep
+
+            # Short links plain HTTP couldn't follow — open them in the browser
+            if not proj["linked"] and proj["match_type"] == "short-unresolved" and page is not None:
+                pdomain = host_of(project_url)
+                still = []
+                for short in proj.get("short_urls", [])[:5]:
+                    dest = _resolve_short_in_browser(page, short)
+                    if pdomain in dest.lower():
+                        exact = urlparse(project_url).path.rstrip("/").lower() in dest.lower()
+                        proj = {"linked": True, "rel": UNKNOWN_REL, "link_text": f"{short} → {host_of(dest)}",
+                                "match_type": "Short link (resolved in browser)", "exact": exact}
+                        break
+                    if host_of(dest) == host_of(short):
+                        still.append(short)
+                else:
+                    if not still:          # every short link resolved, none to the project
+                        proj = {"linked": False, "rel": UNKNOWN_REL, "link_text": "—",
+                                "match_type": None, "exact": False}
+
+            if proj["linked"]:
+                proj_display   = f'✅ {proj["match_type"]}'
+                anchor_display = proj["link_text"] if proj["link_text"] not in ("—", "") else ""
+                rel = proj["rel"]
+                if not rel["known"]:
+                    rel_display = "❔ Unknown (not a normal <a> link)"
+                else:
+                    parts = []
+                    if rel["sponsored"]:
+                        parts.append("Sponsored ⚠️")
+                        reasons.append("Link is rel=sponsored — no SEO value")
+                    if rel["nofollow"]:
+                        parts.append("Nofollow ⚠️")
+                        reasons.append("Link is rel=nofollow — no link juice")
+                    if rel["ugc"]:
+                        parts.append("UGC")
+                        reasons.append("Link is rel=ugc — low SEO value")
+                    rel_display = " + ".join(parts) if parts else "Dofollow ✅"
+                if not proj["exact"]:
+                    proj_display += " (domain only)"
+                    reasons.append("Links to the project domain, but not the exact submitted URL")
+            elif proj["match_type"] == "short-unresolved":
+                proj_display = "⚠️ Short link could not be followed — verify manually"
+                manual.append("short link")
+                proj_needs_retry = True
+                reasons.append(f"Page has a short link ({proj['link_text']}) that couldn't be followed "
+                               "automatically — open it to confirm it goes to the project URL")
+            elif proj["match_type"] == "text-only":
+                proj_display = "⚠️ URL mentioned in text but NOT a clickable link"
+                flags.append("Project URL Not a Backlink")
+                reasons.append("Project URL is only plain text — no actual <a> link")
+            elif is_low_quality_platform(final_url):
+                proj_display = "⚠️ Known login-walled platform — verify manually"
+                reasons.append("Sngine/PHPDolphin-style platform — outbound links may only show to logged-in users")
+                proj_needs_retry = True
+            else:
+                proj_display = "❌ Not linked"
+                flags.append("Project URL Not Linked")
+                reasons.append("Backlink missing — page is accessible but does not link to the project URL")
+                proj_needs_retry = True
+
+        # ── Content quality + AI likelihood ─────────────────────────────────
+        text = _extract_page_text(html)
+        if len(text) > 100:
+            content = score_content(text)
+        if content:
+            quality_display = f'{content["score"]}/10 — {content["quality_label"]}'
+            ai_display      = f'{content["origin_label"]} ({content["ai_pct"]}% AI)'
+            ai_signals      = content["signals"]
+            if content["ai_pct"] >= 80:
+                flags.append("High AI Content")
+                reasons.append(f'Content is {content["ai_pct"]}% likely AI-written')
+            if content["score"] < 4:
+                reasons.append(f'Low content quality ({content["score"]}/10)')
+        else:
+            quality_display = ai_display = "— Too short to score"
+
+    # ── Final verdict ───────────────────────────────────────────────────────
+    low_q = is_low_quality_platform(final_url)
+    if state == "login":
+        status = "🚩 Flagged — Login Wall (zero SEO value)"
+    elif state == "blocked":
+        status = "⚠️ Manual Check"
+    elif (low_q or manual) and not flags:
+        status = "⚠️ Manual Check"
+    elif (low_q or manual) and flags:
+        status = "🚩 Flagged + ⚠️ Manual Check"
+    else:
+        status = "✅ Good" if not flags else "🚩 Flagged"
+
+    result = make_result(
+        link_status, status, "; ".join(reasons) if reasons else "All checks passed ✓", method,
+        **{
+            "Final URL": final_url_out, "Keyword Found?": kw_display,
+            "Project URL Linked?": proj_display, "Link Rel": rel_display,
+            "Anchor Text": anchor_display, "Content Quality": quality_display,
+            "AI Content Score": ai_display, "AI Signals": ai_signals,
+        },
+    )
+    # Ask for a JS-rendered second look if plain HTML missed the link or keyword
+    result["_retry"] = state == "live" and fetch["method"] != "browser" and (proj_needs_retry or not kw_found)
+    return result
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. PIPELINE STAGES
+# ══════════════════════════════════════════════════════════════════════════════
+
+def http_stage(row: dict):
+    """
+    Returns ("final", result) or ("browser", reason, fallback_result_or_None).
+    """
+    live_url, _kw, project_url, activity = _row_fields(row)
+    is_onsite = activity.lower() == "on-site blog"
+
+    if not live_url:
+        return "final", make_result("⛔ No URL provided", "🚩 Flagged", "No backlink URL provided")
+    p = urlparse(live_url)
+    if p.scheme not in ("http", "https") or not p.netloc:
+        return "final", make_result("❌ Invalid URL format", "🚩 Flagged", f"Invalid URL format: {live_url[:80]}")
+    if not is_onsite and project_url and host_of(live_url) == host_of(project_url):
+        return "final", make_result("⚠️ Self-link", "🚩 Flagged",
+                                    "Self-link — backlink is on the project's own domain (no SEO value)")
+
+    # File submissions — only confirm the link is alive, content is checked by hand
+    if activity.lower() in FILE_SUBMISSION_TYPES:
+        f = http_fetch(live_url)
+        if f["state"] == "dead":
+            return "final", make_result(f"❌ {f['error']}", "🚩 Flagged", f"Dead link — {f['error']}", "HTTP")
+        status = "✅ Live" if f["state"] == "live" else f"⚠️ {f['error'] or 'Could not confirm'}"
+        return "final", make_result(status, "⚠️ Manual Check",
+                                    f"File submission ({activity}) — open the file and verify the link by hand",
+                                    "HTTP", **{"Keyword Found?": "⚠️ Verify manually (file)",
+                                               "Project URL Linked?": "⚠️ Verify manually (file)"})
+
+    if is_js_platform(live_url):
+        return "browser", "known JS platform", None
+
+    fetch = http_fetch(live_url)
+
+    if fetch["code"] == 403 and len(fetch["html"]) < 100:
+        return "final", make_result(
+            "⚠️ IP blocked (HTTP 403)", "⚠️ Manual Check",
+            "IP blocked — this site blocks your network entirely, so neither HTTP nor a browser can reach it. "
+            "Verify manually in your own browser.", "HTTP")
+
+    reason = needs_browser_reason(fetch, host_of(project_url))
+    if reason:
+        return "browser", reason, None
+
+    result = analyze(row, fetch)
+    if result.pop("_retry", False):
+        return "browser", "link/keyword not in raw HTML — rendering JS", result
+    return "final", result
+
+
+def browser_stage(page, row: dict, reason: str, fallback):
+    live_url, *_ = _row_fields(row)
+    b = browser_fetch(page, live_url)
+
+    if b["state"] == "live":
+        challenge = detect_challenge(b["html"])
+        if challenge and len(plain_text_fast(b["html"])) < 500:
+            if fallback:
+                return _with_note(fallback, f"browser hit a CAPTCHA ({challenge}) — using HTTP result")
+            return make_result(f"⚠️ CAPTCHA / bot protection ({challenge})", "⚠️ Manual Check",
+                               f"CAPTCHA / bot protection detected ({challenge}) — automated tools can't pass it. "
+                               "Verify manually in your browser.", "Headless browser")
+        result = analyze(row, b, page=page, note=reason)
+        result.pop("_retry", None)
+        # Still a bot-check page and nothing found → it's the wall, not the page
+        wall = looks_like_challenge(b["html"])
+        if wall and result["Project URL Linked?"].startswith(("❌", "⛔ N/A (no")):
+            challenge = wall
+            if fallback:
+                return _with_note(fallback, f"browser hit a bot check ({challenge}) — using HTTP result")
+            return make_result(f"⚠️ CAPTCHA / bot protection ({challenge})", "⚠️ Manual Check",
+                               f"Bot protection detected ({challenge}) — the backlink may exist but automated "
+                               "tools can't get past it. Verify manually in your browser.", "Headless browser")
+        return result
+
+    if b["state"] in ("login", "dead"):
+        result = analyze(row, b, page=None, note=reason)
+        result.pop("_retry", None)
+        return result
+
+    # Browser couldn't get in either
+    if fallback:
+        return _with_note(fallback, f"browser failed ({b['error']}) — using HTTP result")
+    return last_resort(row, reason, b.get("error"))
+
+
+def last_resort(row: dict, reason: str, browser_error=None):
+    """Alternate HTTP client, then give up with a clear Manual Check."""
+    live_url, *_ = _row_fields(row)
+    alt = http_fetch(live_url, alt=True)
+    if alt["state"] == "live" and len(alt["html"].strip()) > 500 and not detect_challenge(alt["html"]):
+        result = analyze(row, alt, note=reason)
+        needs_js = result.pop("_retry", False)
+        # The browser never rendered this page, so a miss here isn't proof
+        if needs_js and result["Audit Result"] in ("🚩 Flagged", "✅ Good"):
+            if result["Audit Result"] == "🚩 Flagged":
+                result["Audit Result"] = "⚠️ Manual Check"
+                result["Flag Reason"] = ("Browser couldn't load this page and the plain-HTML copy may be "
+                                         "missing JavaScript content — verify manually. (" + result["Flag Reason"] + ")")
+        return result
+    if alt["state"] == "dead":
+        result = analyze(row, alt, note=reason)
+        result.pop("_retry", None)
+        return result
+    why = browser_error or alt.get("error") or "blocked"
+    return make_result(f"⚠️ Verify manually — {why}", "⚠️ Manual Check",
+                       f"All automated methods failed ({reason}; {why}). Verify manually in your browser.",
+                       "HTTP → browser → alt HTTP")
+
+
+def _with_note(result: dict, note: str) -> dict:
+    result = dict(result)
+    result.pop("_retry", None)
+    result["Fetch Method"] = f"HTTP — {note}"
+    return result
+
+
+def run_browser_phase(jobs, on_done, workers: int):
+    """jobs: list of (i, row, reason, fallback). Calls on_done(i, result, label)."""
+    if not jobs:
+        return
+    pending = {j[0] for j in jobs}
+    lock = threading.Lock()
+
+    def finish(i, result):
+        with lock:
+            if i not in pending:
+                return
+            pending.discard(i)
+        on_done(i, result, "BROWSER")
+
+    if PLAYWRIGHT_OK:
+        q = queue.Queue()
+        for j in jobs:
+            q.put(j)
+
+        def worker(wid: int):
+            try:
+                with sync_playwright() as pw:
+                    launch_args = dict(headless=True, args=[
+                        "--disable-blink-features=AutomationControlled", "--no-sandbox",
+                        "--disable-dev-shm-usage", "--disable-features=IsolateOrigins,site-per-process",
+                    ])
+                    try:
+                        # Real Google Chrome gets past Cloudflare more often than Chromium
+                        browser = pw.chromium.launch(channel="chrome", **launch_args)
+                    except Exception:
+                        browser = pw.chromium.launch(**launch_args)
+                    context = browser.new_context(
+                        user_agent=MAIN_HEADERS["User-Agent"], viewport={"width": 1280, "height": 800},
+                        locale="en-US", ignore_https_errors=True,
+                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9", "DNT": "1"},
+                    )
+                    context.add_init_script("""
+                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+                        Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+                        window.chrome = { runtime: {} };
+                    """)
+                    context.route("**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf,mp4,webm,ico}",
+                                  lambda r: r.abort())
+                    page = context.new_page()
+                    while True:
+                        try:
+                            i, row, reason, fallback = q.get_nowait()
+                        except queue.Empty:
+                            break
+                        try:
+                            if page.is_closed():
+                                page = context.new_page()
+                            result = browser_stage(page, row, reason, fallback)
+                        except Exception as e:
+                            result = fallback and _with_note(fallback, f"browser error — using HTTP result")
+                            result = result or last_resort(row, reason, str(e)[:80])
+                        finish(i, result)
+                    browser.close()
+            except Exception as e:
+                print(f"   ⚠️  Browser worker {wid} could not start: {str(e)[:120]}")
+
+        threads = [threading.Thread(target=worker, args=(w,), daemon=True) for w in range(1, workers + 1)]
+        for t in threads:
+            t.start()
+            time.sleep(0.4)
+        for t in threads:
+            t.join()
+
+    # Anything the browser never got to (no Playwright, Chromium missing, crash)
+    for i, row, reason, fallback in jobs:
+        if i in pending:
+            result = _with_note(fallback, "no browser available — using HTTP result") if fallback \
+                else last_resort(row, reason, "headless browser unavailable")
+            finish(i, result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 9. EXCEL STYLING
 # ══════════════════════════════════════════════════════════════════════════════
 
 def apply_styling(path: str):
@@ -1177,27 +1578,20 @@ def apply_styling(path: str):
     ws = wb.active
     thin   = Side(style="thin", color="FFCCCCCC")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    fills  = {k: PatternFill("solid", start_color=c) for k, c in
+              {"good": CLR_GREEN, "bad": CLR_RED, "warn": CLR_YELLOW, "info": CLR_BLUE}.items()}
 
-    hdr_fill = PatternFill("solid", start_color=CLR_HEADER)
-    hdr_font = Font(bold=True, color=CLR_WHITE, size=10, name="Arial")
     for cell in ws[1]:
-        cell.fill      = hdr_fill
-        cell.font      = hdr_font
+        cell.fill      = PatternFill("solid", start_color=CLR_HEADER)
+        cell.font      = Font(bold=True, color=CLR_WHITE, size=10, name="Arial")
         cell.border    = border
         cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     ws.row_dimensions[1].height = 32
-
     col_map = {cell.value: cell.column for cell in ws[1]}
-    fills   = {
-        "good": PatternFill("solid", start_color=CLR_GREEN),
-        "bad" : PatternFill("solid", start_color=CLR_RED),
-        "warn": PatternFill("solid", start_color=CLR_YELLOW),
-        "info": PatternFill("solid", start_color=CLR_BLUE),
-    }
 
-    def getcell(row, name):
-        idx = col_map.get(name)
-        return row[idx - 1] if idx else None
+    def tick_fill(val):
+        return fills["good"] if "✅" in val else fills["warn"] if ("⚠️" in val or "❔" in val) \
+            else fills["info"] if ("⛔" in val or "⏸" in val or not val) else fills["bad"]
 
     for row in ws.iter_rows(min_row=2, max_row=ws.max_row):
         for cell in row:
@@ -1205,86 +1599,53 @@ def apply_styling(path: str):
             cell.border    = border
             cell.font      = Font(name="Arial", size=9)
 
-        # Audit Result
-        ar = getcell(row, "Audit Result")
-        if ar:
-            val = str(ar.value or "")
-            ar.fill = (fills["good"] if "Good" in val
-                       else fills["warn"] if "Manual" in val
-                       else fills["bad"])
-            ar.font = Font(bold=True, name="Arial", size=9)
-            ar.alignment = Alignment(horizontal="center", vertical="center")
+        def cell_of(name):
+            idx = col_map.get(name)
+            return row[idx - 1] if idx else None
 
-        # Link Status
-        ls = getcell(row, "Link Status")
-        if ls:
-            val = str(ls.value or "")
-            ls.fill = (fills["good"] if "✅" in val
-                       else fills["warn"] if "⚠️" in val
-                       else fills["bad"])
-            ls.alignment = Alignment(horizontal="center", vertical="center")
+        c = cell_of("Audit Result")
+        if c:
+            v = str(c.value or "")
+            c.fill = fills["good"] if "Good" in v else fills["info"] if "Skipped" in v \
+                else fills["bad"] if "Flagged" in v else fills["warn"]
+            c.font = Font(bold=True, name="Arial", size=9)
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
-        # Keyword Found
-        kf = getcell(row, "Keyword Found?")
-        if kf:
-            val = str(kf.value or "")
-            kf.fill = (fills["good"] if "✅" in val
-                       else fills["warn"] if "⚠️" in val
-                       else fills["bad"])
-            kf.alignment = Alignment(horizontal="center", vertical="center")
+        for name in ("Link Status", "Keyword Found?", "Project URL Linked?"):
+            c = cell_of(name)
+            if c:
+                c.fill = tick_fill(str(c.value or ""))
 
-        # Project URL Linked
-        pu = getcell(row, "Project URL Linked?")
-        if pu:
-            val = str(pu.value or "")
-            pu.fill = (fills["good"] if "✅" in val and "Nofollow" not in val
-                       else fills["warn"] if "Nofollow" in val or "⚠️" in val
-                       else fills["bad"])
-            pu.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c = cell_of("Link Rel")
+        if c and c.value:
+            v = str(c.value)
+            c.fill = fills["good"] if "Dofollow" in v else fills["warn"]
 
-        # AI Content Score
-        ai = getcell(row, "AI Content Score")
-        if ai:
-            val = str(ai.value or "")
-            if "Human Written" in val or "Mostly Human" in val:
-                ai.fill = fills["good"]
-            elif "Mixed" in val or "⚠️" in val:
-                ai.fill = fills["warn"]
-            elif "Mostly AI" in val or "AI Generated" in val:
-                ai.fill = fills["bad"]
-            else:
-                ai.fill = fills["info"]
-            ai.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
+        c = cell_of("Content Quality")
+        if c:
+            v = str(c.value or "")
+            c.fill = fills["good"] if ("Excellent" in v or "Good Quality" in v) else fills["warn"] \
+                if "Average" in v else fills["bad"] if "Low" in v else fills["info"]
 
-        # DA / SS — center, no color until Moz is added
-        for col_name in ("DA", "SS"):
-            c = getcell(row, col_name)
+        c = cell_of("AI Content Score")
+        if c:
+            v = str(c.value or "")
+            c.fill = fills["good"] if ("Human" in v) else fills["warn"] if "Mixed" in v \
+                else fills["bad"] if ("Likely AI" in v or "AI Generated" in v) else fills["info"]
+
+        for name in ("DA", "SS"):
+            c = cell_of(name)
             if c:
                 c.alignment = Alignment(horizontal="center", vertical="center")
 
     widths = {
-        "Backlink Create Date"  : 18,
-        "Website"               : 16,
-        "Domain Country"        : 14,
-        "Employee Name"         : 18,
-        "Backlink Activity Type": 20,
-        "Referring Domain"      : 32,
-        "DA"                    : 10,
-        "SS"                    : 10,
-        "Backlink Live Link"    : 52,
-        "Target Keyword"        : 28,
-        "Submitted Project Url" : 45,
-        "Status"                : 10,
-        "Link Status"           : 30,
-        "Final URL"             : 50,
-        "Keyword Found?"        : 24,
-        "Project URL Linked?"   : 45,
-        "AI Content Score"      : 32,
-        "Audit Result"          : 16,
-        "Flag Reason"           : 58,
-        "Email"                 : 26,
-        "User  Name"            : 14,
-        "Password"              : 14,
+        "Backlink Create Date": 18, "Website": 16, "Domain Country": 14, "Employee Name": 18,
+        "Backlink Activity Type": 20, "Referring Domain": 32, "DA": 10, "SS": 10,
+        "Backlink Live Link": 52, "Target Keyword": 28, "Submitted Project Url": 45, "Status": 10,
+        "Link Status": 30, "Final URL": 40, "Fetch Method": 28, "Keyword Found?": 24,
+        "Project URL Linked?": 30, "Link Rel": 18, "Anchor Text": 26, "Content Quality": 24,
+        "AI Content Score": 24, "AI Signals": 50, "Audit Result": 18, "Flag Reason": 60,
+        "Email": 26, "User  Name": 14, "Password": 14,
     }
     for name, width in widths.items():
         if name in col_map:
@@ -1296,255 +1657,152 @@ def apply_styling(path: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7. MAIN
+# 10. MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
 def main():
-    parser = argparse.ArgumentParser(description="Backlink Auditor v3 — AI Content Edition")
-    parser.add_argument("input",    help="Excel file, e.g. 'Tijeet singh.xlsx'")
+    parser = argparse.ArgumentParser(description="Backlink Auditor v4 — Hybrid Engine")
+    parser.add_argument("input", help="Excel file, e.g. 'Tijeet singh.xlsx'")
     parser.add_argument("--output", default="", help="Output filename (optional)")
-    parser.add_argument(
-        "--filter-methods",
-        default="",
-        help="Comma-separated list of methods to audit.",
-    )
-    # Meta fields — filled from UI if not in sheet
-    parser.add_argument("--meta-project",    default="", help="Project/Website name")
-    parser.add_argument("--meta-project-id", default="", help="Project ID")
-    parser.add_argument("--meta-manager",    default="", help="Project Manager name")
-    parser.add_argument("--meta-teamlead",   default="", help="Team Lead name")
+    parser.add_argument("--filter-methods", default="", help="Comma-separated activity types to audit")
+    parser.add_argument("--moz-key", default="", help="Moz access_id:secret (reserved for DA/SS)")
+    parser.add_argument("--meta-project", default="")
+    parser.add_argument("--meta-project-id", default="")
+    parser.add_argument("--meta-manager", default="")
+    parser.add_argument("--meta-teamlead", default="")
+    parser.add_argument("--http-workers", type=int, default=HTTP_WORKERS)
+    parser.add_argument("--browser-workers", type=int, default=BROWSER_WORKERS)
+    parser.add_argument("--no-browser", action="store_true", help="HTTP only — skip the headless browser")
     args = parser.parse_args()
 
     output = args.output or args.input.replace(".xlsx", "_AUDITED.xlsx")
-
-    # Parse filter list (empty = audit everything)
-    filter_methods = []
-    if args.filter_methods:
-        filter_methods = [m.strip() for m in args.filter_methods.split(",") if m.strip()]
+    filter_methods = [m.strip() for m in args.filter_methods.split(",") if m.strip()]
+    use_browser = PLAYWRIGHT_OK and not args.no_browser
 
     print("\n" + "═" * 64)
-    print("   BACKLINK AUDITOR v3 — AI Content Edition")
+    print("   BACKLINK AUDITOR v4 — Hybrid Engine")
     print("═" * 64)
     print(f"   Input   : {args.input}")
     print(f"   Output  : {output}")
-    print(f"   Engine  : Headless Chrome + Local AI Heuristic Scoring")
-    print(f"   DA / SS : — (add --moz-key later to enable)")
+    print(f"   Engine  : {args.http_workers} parallel HTTP + "
+          + (f"{args.browser_workers} headless Chrome fallback" if use_browser else "no browser (HTTP only)"))
+    if not PLAYWRIGHT_OK and not args.no_browser:
+        print("   Note    : Playwright not installed — JS pages fall back to HTTP / Manual Check")
     if filter_methods:
         print(f"   Filter  : Auditing only — {', '.join(filter_methods)}")
     print("═" * 64 + "\n")
 
-    # Auto-detect sheet name — try "Backlinks" first, then first available sheet
-    xl        = pd.ExcelFile(args.input)
-    all_sheets = xl.sheet_names
-    if "Backlinks" in all_sheets:
-        sheet_name = "Backlinks"
-    elif "Worksheet" in all_sheets:
-        sheet_name = "Worksheet"
-    else:
-        sheet_name = all_sheets[0]
-    print(f"   Sheet   : {sheet_name}")
-
-    df    = pd.read_excel(args.input, sheet_name=sheet_name, dtype=str).fillna("")
+    xl = pd.ExcelFile(args.input)
+    sheet_name = next((s for s in ("Backlinks", "Worksheet") if s in xl.sheet_names), xl.sheet_names[0])
+    df = pd.read_excel(args.input, sheet_name=sheet_name, dtype=str).fillna("")
     total = len(df)
+    print(f"   Sheet   : {sheet_name}")
     print(f"   📋  {total} backlinks loaded.\n")
 
-    # Find the activity type column for filtering
-    activity_col = None
-    for col in df.columns:
-        if "activity type" in col.lower() or "method" in col.lower():
-            activity_col = col
-            break
+    activity_col = next((c for c in df.columns if "activity type" in c.lower() or "method" in c.lower()), None)
 
-    # Check if DA/SS already have values in the sheet (e.g. filled by team manually)
     da_prefilled = "DA" in df.columns and df["DA"].str.strip().replace("", pd.NA).notna().any()
     ss_prefilled = "SS" in df.columns and df["SS"].str.strip().replace("", pd.NA).notna().any()
-
-    if da_prefilled or ss_prefilled:
-        print(f"   DA/SS   : ✅ Using existing values from sheet")
-    else:
-        print(f"   DA/SS   : — (not in sheet, will show blank)")
-
-    # Drop only old AUTO audit columns — preserve original DA/SS if already filled
-    drop_cols = [
-        "DA (Auto)", "SS % (Auto)",
-        "Link Status", "Final URL", "Keyword Found?",
-        "Project URL Linked?", "AI Content Score",
-        "Audit Result", "Flag Reason"
-    ]
-    # Only drop DA/SS if they were blank (not pre-filled)
+    drop_cols = RESULT_COLUMNS + ["DA (Auto)", "SS % (Auto)", "AI Content Score"]
     if not da_prefilled:
         drop_cols.append("DA")
     if not ss_prefilled:
         drop_cols.append("SS")
+    df = df.drop(columns=[c for c in set(drop_cols) if c in df.columns])
 
-    df = df.drop(columns=[c for c in drop_cols if c in df.columns])
-
-    # Add new tracking columns if not already present
-    for col, default in [
-        ("Project ID",      ""),
-        ("Project Manager", ""),
-        ("Team Lead",       ""),
-    ]:
+    for col in ("Project ID", "Project Manager", "Team Lead"):
         if col not in df.columns:
-            df.insert(df.columns.get_loc("Employee Name") + 1 if "Employee Name" in df.columns else len(df.columns), col, default)
-
-    # Fill from CLI meta args if column is blank and arg was provided
-    meta_map = {
-        "Project ID"     : args.meta_project_id,
-        "Project Manager": args.meta_manager,
-        "Team Lead"      : args.meta_teamlead,
-        "Website"        : args.meta_project,
-    }
-    for col, val in meta_map.items():
-        if val and col in df.columns:
-            # Only fill blank cells
+            pos = df.columns.get_loc("Employee Name") + 1 if "Employee Name" in df.columns else len(df.columns)
+            df.insert(pos, col, "")
+    for col, val in {"Project ID": args.meta_project_id, "Project Manager": args.meta_manager,
+                     "Team Lead": args.meta_teamlead, "Website": args.meta_project}.items():
+        if not val:
+            continue
+        if col in df.columns:
             df[col] = df[col].apply(lambda x: val if str(x).strip() == "" else x)
-        elif val and col == "Website" and col not in df.columns:
+        else:
             df[col] = val
 
-    results     = [None] * total
-    skipped_count = 0
-    WORKERS     = 3   # number of parallel browser tabs
-
-    # Pre-build rows list with index for parallel processing
-    rows_list = [(i, idx, row) for i, (idx, row) in enumerate(df.iterrows(), 1)]
-
-    # Separate skipped and to-audit rows
+    results  = [None] * total
+    rows     = {}
     to_audit = []
-    for i, idx, row in rows_list:
-        row_method = str(row.get(activity_col, "")).strip() if activity_col else ""
-        if filter_methods and row_method and row_method not in filter_methods:
-            skipped_count += 1
-            print(f"   [{i:>3}/{total}]  ⏭  Skipped — {row_method}")
-            results[i-1] = {
-                "Link Status"         : f"⏸ Skipped — {row_method} not selected",
-                "Final URL"           : "",
-                "Keyword Found?"      : "⏸ Not audited",
-                "Project URL Linked?" : "⏸ Not audited",
-                "AI Content Score"    : "⏸ Not audited",
-                "Audit Result"        : "⏸ Skipped",
-                "Flag Reason"         : f"Activity type '{row_method}' not selected for this audit run",
-            }
+    lock     = threading.Lock()
+    done     = [0]
+
+    def report(i, result, label):
+        results[i - 1] = result
+        ref = str(rows[i].get("Referring Domain", "") or host_of(_row_fields(rows[i])[0])).strip()
+        icon = ("✅" if "Good" in result["Audit Result"] else
+                "⚠️" if result["Audit Result"].startswith("⚠️") else "🚩")
+        with lock:
+            done[0] += 1
+            print(f"   [{done[0]:>3}/{total}]  {label:<7}  {ref[:38]:<38}  #{i}")
+            print(f"          → {icon}  {result['Link Status'][:40]}  |  "
+                  f"Proj: {result['Project URL Linked?'][:28]}  |  KW: {result['Keyword Found?'][:20]}")
+
+    for i, (_, row) in enumerate(df.iterrows(), 1):
+        rows[i] = row.to_dict()
+        method = str(row.get(activity_col, "")).strip() if activity_col else ""
+        if filter_methods and method and method not in filter_methods:
+            results[i - 1] = make_result(
+                f"⏸ Skipped — {method} not selected", "⏸ Skipped",
+                f"Activity type '{method}' not selected for this audit run",
+                **{k: "⏸ Not audited" for k in ("Keyword Found?", "Project URL Linked?",
+                                                 "Content Quality", "AI Content Score")})
+            with lock:
+                done[0] += 1
+                print(f"   [{done[0]:>3}/{total}]  ⏭  Skipped — {method}")
         else:
-            to_audit.append((i, row))
+            to_audit.append(i)
 
-    print(f"   🔍 Auditing {len(to_audit)} rows with {WORKERS} parallel workers...\n")
+    # ── Phase 1: parallel HTTP ──────────────────────────────────────────────
+    print(f"   ⚡ Phase 1 — fast HTTP check of {len(to_audit)} rows ({args.http_workers} at a time)\n")
+    browser_jobs = []
+    with ThreadPoolExecutor(max_workers=max(1, args.http_workers)) as ex:
+        futures = {ex.submit(http_stage, rows[i]): i for i in to_audit}
+        for fut in as_completed(futures):
+            i = futures[fut]
+            try:
+                out = fut.result()
+            except Exception as e:
+                out = ("browser", f"HTTP error: {str(e)[:60]}", None)
+            if out[0] == "final":
+                report(i, out[1], "HTTP")
+            elif use_browser:
+                browser_jobs.append((i, rows[i], out[1], out[2]))
+            else:
+                fb = out[2]
+                report(i, _with_note(fb, "browser disabled") if fb else last_resort(rows[i], out[1], "browser disabled"), "HTTP")
 
-    import threading
-    import queue
+    # ── Phase 2: headless browser for the rows that need it ─────────────────
+    if browser_jobs:
+        browser_jobs.sort(key=lambda j: j[0])
+        print(f"\n   🌐 Phase 2 — {len(browser_jobs)} rows need a headless browser "
+              f"({args.browser_workers} at a time)\n")
+        run_browser_phase(browser_jobs, report, max(1, args.browser_workers))
 
-    lock         = threading.Lock()
-    work_queue   = queue.Queue()
-    for item in to_audit:
-        work_queue.put(item)
+    results = [r if r is not None else make_result("⚠️ Worker error", "⚠️ Manual Check",
+                                                   "Processing error — verify manually") for r in results]
+    for r in results:
+        r.pop("_retry", None)
 
-    def worker(worker_id: int):
-        """Each worker gets its own browser page and processes rows from the queue."""
-        with sync_playwright() as pw:
-            browser = pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--disable-blink-features=AutomationControlled",
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-features=IsolateOrigins,site-per-process",
-                ],
-            )
-            context = browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-                viewport={"width": 1280, "height": 800},
-                locale="en-US",
-                extra_http_headers={
-                    "Accept"                 : "text/html,application/xhtml+xml,*/*;q=0.8",
-                    "Accept-Language"        : "en-US,en;q=0.9",
-                    "Accept-Encoding"        : "gzip, deflate, br",
-                    "DNT"                    : "1",
-                    "Upgrade-Insecure-Requests": "1",
-                },
-            )
-            context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-                window.chrome = { runtime: {} };
-            """)
-            page = context.new_page()
-            page.route(
-                "**/*.{png,jpg,jpeg,gif,svg,woff,woff2,ttf,mp4,webm,ico}",
-                lambda r: r.abort()
-            )
-
-            while True:
-                try:
-                    i, row = work_queue.get_nowait()
-                except queue.Empty:
-                    break
-
-                ref = str(row.get("Referring Domain", "")).strip()
-                kw  = str(row.get("Target Keyword",   "")).strip()
-
-                with lock:
-                    print(f"   [{i:>3}/{total}]  W{worker_id}  {ref[:38]:<38}  kw: {kw[:18]}")
-
-                result = audit_row(row.to_dict(), page, None)
-                results[i-1] = result
-
-                icon = ("✅" if "Good"    in result["Audit Result"] else
-                        "⚠️"  if "Manual"  in result["Audit Result"] else "🚩")
-                with lock:
-                    print(
-                        f"          → {icon}  "
-                        f"Live:{result['Link Status'][:6]}  "
-                        f"KW:{result['Keyword Found?'][:6]}  "
-                        f"Proj:{result['Project URL Linked?'][:6]}"
-                    )
-
-                work_queue.task_done()
-                time.sleep(0.2)
-
-            browser.close()
-
-    # Launch workers in parallel threads
-    threads = []
-    for wid in range(1, WORKERS + 1):
-        t = threading.Thread(target=worker, args=(wid,), daemon=True)
-        t.start()
-        threads.append(t)
-        time.sleep(0.5)   # stagger startup slightly
-
-    for t in threads:
-        t.join()
-
-    # Fill any None slots (shouldn't happen but just in case)
-    results = [r if r is not None else {
-        "Link Status": "⚠️ Worker error — verify manually",
-        "Final URL": "", "Keyword Found?": "⚠️ Error",
-        "Project URL Linked?": "⚠️ Error", "AI Content Score": "—",
-        "Audit Result": "⚠️ Manual Check", "Flag Reason": "Worker processing error",
-    } for r in results]
-
-    df = pd.concat([df, pd.DataFrame(results)], axis=1)
+    df = pd.concat([df.reset_index(drop=True), pd.DataFrame(results, columns=RESULT_COLUMNS)], axis=1)
     df.to_excel(output, index=False, sheet_name=sheet_name)
     apply_styling(output)
 
-    good    = sum(1 for r in results if r and "Good"    in r.get("Audit Result",""))
-    manual  = sum(1 for r in results if r and "Manual"  in r.get("Audit Result",""))
-    flagged = sum(1 for r in results if r and "Flagged" in r.get("Audit Result",""))
-    skipped = sum(1 for r in results if r and "Skipped" in r.get("Audit Result",""))
+    def count(word):
+        return sum(1 for r in results if word in r["Audit Result"])
 
     print("\n" + "═" * 64)
     print("   AUDIT COMPLETE")
     print("═" * 64)
     print(f"   Total           : {total}")
-    print(f"   ✅ Good         : {good}")
-    print(f"   ⚠️  Manual Check : {manual}")
-    print(f"   🚩 Flagged      : {flagged}")
-    if skipped:
-        print(f"   ⏸  Skipped      : {skipped}")
+    print(f"   ✅ Good         : {count('Good')}")
+    print(f"   ⚠️  Manual Check : {count('Manual')}")
+    print(f"   🚩 Flagged      : {count('Flagged')}")
+    if count("Skipped"):
+        print(f"   ⏸  Skipped      : {count('Skipped')}")
+    print(f"   🌐 Browser used : {len(browser_jobs)} of {len(to_audit)} rows")
     print(f"   📁 Output       : {output}")
     print("═" * 64 + "\n")
 
