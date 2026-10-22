@@ -294,6 +294,29 @@ def healthz():
     return "ok"
 
 
+@app.route("/browser-check")
+def browser_check():
+    """Open this page to confirm headless Chrome can start on this server."""
+    import subprocess, sys
+    code = (
+        "from playwright.sync_api import sync_playwright\n"
+        "with sync_playwright() as p:\n"
+        "    b = p.chromium.launch(headless=True, args=['--no-sandbox','--disable-dev-shm-usage'])\n"
+        "    pg = b.new_page(); pg.set_content('<title>ok</title>'); print('CHROME OK —', b.version, '—', pg.title())\n"
+        "    b.close()\n"
+    )
+    try:
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=90)
+        text = (out.stdout + out.stderr).strip()
+    except Exception as e:
+        text = f"Check failed: {e}"
+    ok = "CHROME OK" in text
+    path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "(default)")
+    body = (f"{'✅ Headless Chrome works' if ok else '❌ Headless Chrome did NOT start'}\n\n"
+            f"PLAYWRIGHT_BROWSERS_PATH = {path}\n\n{text[-3000:]}")
+    return Response(body, mimetype="text/plain; charset=utf-8")
+
+
 # Allow ngrok to bypass the browser warning interstitial
 @app.after_request
 def add_headers(response):
