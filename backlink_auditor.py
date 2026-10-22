@@ -84,7 +84,8 @@ except Exception:
 # ══════════════════════════════════════════════════════════════════════════════
 
 HTTP_WORKERS    = int(os.environ.get("HTTP_WORKERS", 10))      # parallel plain-HTTP requests
-BROWSER_WORKERS = int(os.environ.get("BROWSER_WORKERS", 3))    # parallel headless Chrome tabs
+BROWSER_WORKERS = int(os.environ.get("BROWSER_WORKERS", 2 if os.environ.get("RENDER") else 3))  # parallel Chrome tabs
+PAGE_TIMEOUT_MS = int(os.environ.get("PAGE_TIMEOUT", 20)) * 1000  # max wait for one page to load
 MAX_BODY_BYTES  = 768 * 1024  # stop reading huge pages after this much
 
 CLR_HEADER = "FF1565C0"
@@ -372,6 +373,8 @@ _SHORT_CACHE = _load_short_cache()
 def _remember_short(url: str, dest: str):
     with _SHORT_LOCK:
         _SHORT_CACHE[url] = dest
+        for k, v in _load_short_cache().items():     # keep entries other workers saved
+            _SHORT_CACHE.setdefault(k, v)
         try:
             with open(SHORT_LINKS_FILE, "w", encoding="utf-8") as f:
                 json.dump(dict(sorted(_SHORT_CACHE.items())), f, indent=2)
@@ -449,10 +452,10 @@ def _resolve_short_in_browser(page, url: str) -> str:
         tab = page.context.new_page()
         tab.on("request", on_request)
         try:
-            tab.goto(url, wait_until="domcontentloaded", timeout=25000)
+            tab.goto(url, wait_until="commit", timeout=12000)
         except Exception:
             pass                       # the destination may fail — the redirect is what we need
-        for _ in range(8):             # give interstitial / JS redirects up to ~8s
+        for _ in range(4):             # give interstitial / JS redirects up to ~4s
             if seen or host_of(tab.url) != short_host:
                 break
             tab.wait_for_timeout(1000)
@@ -647,12 +650,12 @@ def browser_fetch(page, url: str) -> dict:
             res["state"], res["html"] = "live", html
 
     try:
-        resp = page.goto(actual, wait_until="domcontentloaded", timeout=45000)
+        resp = page.goto(actual, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
         code = resp.status if resp else None
         try:
-            page.wait_for_load_state("networkidle", timeout=5000)
+            page.wait_for_load_state("networkidle", timeout=2500)
         except PlaywrightTimeout:
-            page.wait_for_timeout(1500)
+            pass
 
         if code is not None and 200 <= code < 300:
             finish_live(code)
@@ -663,8 +666,8 @@ def browser_fetch(page, url: str) -> dict:
             else:
                 res["error"] = "No HTTP status — page may have redirected"
         elif code in (429, 500, 502, 503, 508, 509):
-            time.sleep(5)                               # temporary — retry once
-            resp2 = page.goto(actual, wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)                               # temporary — retry once
+            resp2 = page.goto(actual, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             if resp2 and resp2.status == 200:
                 finish_live(200)
             else:
@@ -678,8 +681,8 @@ def browser_fetch(page, url: str) -> dict:
 
     except PlaywrightTimeout:
         try:                                            # last try: first byte only
-            resp = page.goto(actual, wait_until="commit", timeout=20000)
-            page.wait_for_timeout(4000)
+            resp = page.goto(actual, wait_until="commit", timeout=8000)
+            page.wait_for_timeout(2000)
             html = _grab_html(page)
             code = resp.status if resp else None
             if len(html) > 1500 and (code is None or 200 <= code < 300):
@@ -878,16 +881,16 @@ def _deep_retry_project_url(page, project_url: str) -> dict:
     """Post-render DOM scan for links injected by AJAX after load."""
     empty = {"linked": False, "rel": UNKNOWN_REL, "link_text": "—", "match_type": None, "exact": False}
     try:
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(800)
         page.evaluate("""
             async () => {
                 const sleep = ms => new Promise(r => setTimeout(r, ms));
                 for (const f of [0, 0.5, 1, 0.5, 0]) {
-                    window.scrollTo(0, document.body.scrollHeight * f); await sleep(400);
+                    window.scrollTo(0, document.body.scrollHeight * f); await sleep(200);
                 }
             }
         """)
-        page.wait_for_timeout(1500)
+        page.wait_for_timeout(600)
 
         project_domain = host_of(project_url)
         project_path   = urlparse(project_url).path.rstrip("/").lower()
@@ -1498,6 +1501,31 @@ def _with_note(result: dict, note: str) -> dict:
     return result
 
 
+ROW_BUDGET_S = int(os.environ.get("ROW_TIMEOUT", 60))   # hard limit per row in the browser
+
+# Things a backlink check never needs — skipping them makes pages load much faster
+_BLOCK_TYPES = {"image", "media", "font"}
+_BLOCK_HOSTS = (
+    "googletagmanager.com", "google-analytics.com", "doubleclick.net", "googlesyndication.com",
+    "adservice.google", "facebook.net", "connect.facebook", "hotjar.com", "clarity.ms",
+    "amazon-adsystem.com", "adnxs.com", "taboola.com", "outbrain.com", "criteo.", "quantserve.com",
+    "scorecardresearch.com", "pubmatic.com", "rubiconproject.com", "moatads.com", "yandex.ru/metrika",
+)
+
+
+def _route_filter(route):
+    try:
+        req = route.request
+        if req.resource_type in _BLOCK_TYPES or any(h in req.url for h in _BLOCK_HOSTS):
+            return route.abort()
+        return route.continue_()
+    except Exception:
+        try:
+            route.continue_()
+        except Exception:
+            pass
+
+
 def _probe_browser():
     """Try to start headless Chromium once. Returns None if OK, else the error text."""
     if not PLAYWRIGHT_OK:
@@ -1534,87 +1562,164 @@ def ensure_browser() -> bool:
     return ok
 
 
+def _launch_context(pw):
+    """Start headless Chrome with the settings every worker uses."""
+    launch_args = dict(headless=True, args=[
+        "--disable-blink-features=AutomationControlled", "--no-sandbox",
+        "--disable-dev-shm-usage", "--disable-features=IsolateOrigins,site-per-process",
+    ])
+    try:
+        # Real Google Chrome gets past Cloudflare more often than Chromium
+        browser = pw.chromium.launch(channel="chrome", **launch_args)
+    except Exception:
+        browser = pw.chromium.launch(**launch_args)
+    context = browser.new_context(
+        user_agent=MAIN_HEADERS["User-Agent"], viewport={"width": 1280, "height": 800},
+        locale="en-US", ignore_https_errors=True,
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9", "DNT": "1"},
+    )
+    context.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
+        Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+        window.chrome = { runtime: {} };
+    """)
+    context.route("**/*", _route_filter)
+    context.set_default_timeout(PAGE_TIMEOUT_MS)
+    return browser, context
+
+
+def _short_launch_error(msg: str) -> str:
+    if "Executable doesn't exist" in msg:
+        return "Chrome is not installed on this server (run: python -m playwright install chromium)"
+    if "shared librar" in msg or "missing dependencies" in msg.lower():
+        return "Chrome is missing system libraries (deploy with the Dockerfile / Docker runtime)"
+    return msg.strip().splitlines()[0][:150] if msg.strip() else "unknown error"
+
+
+def _browser_child(wid, job_q, res_q):
+    """
+    One browser worker, running in its own process so the parent can kill it
+    if a page freezes Chrome. Messages to the parent:
+      ("start", wid, i)  ("done", wid, i, result)  ("launch_error", wid, text)
+    """
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+    try:
+        with sync_playwright() as pw:
+            try:
+                browser, context = _launch_context(pw)
+            except Exception as e:
+                res_q.put(("launch_error", wid, _short_launch_error(str(e))))
+                return
+            page = context.new_page()
+            while True:
+                job = job_q.get()
+                if job is None:
+                    break
+                i, row, reason, fallback = job
+                res_q.put(("start", wid, i))
+                try:
+                    if page.is_closed():
+                        page = context.new_page()
+                    result = browser_stage(page, row, reason, fallback)
+                except Exception as e:
+                    note = str(e).strip().splitlines()[0][:80] if str(e).strip() else "browser error"
+                    result = fallback and _with_note(fallback, f"browser: {note} — using HTTP result")
+                    result = result or last_resort(row, reason, note)
+                res_q.put(("done", wid, i, result))
+            browser.close()
+    except Exception as e:
+        res_q.put(("launch_error", wid, _short_launch_error(str(e))))
+
+
 def run_browser_phase(jobs, on_done, workers: int):
     """jobs: list of (i, row, reason, fallback). Calls on_done(i, result, label)."""
     if not jobs:
         return
-    if PLAYWRIGHT_OK:
-        ensure_browser()
     pending = {j[0] for j in jobs}
-    lock = threading.Lock()
+    by_index = {j[0]: j for j in jobs}
     launch_errors = []
-    if not PLAYWRIGHT_OK:
-        launch_errors.append("Playwright is not installed")
 
     def finish(i, result):
-        with lock:
-            if i not in pending:
-                return
+        if i in pending:
             pending.discard(i)
-        on_done(i, result, "BROWSER")
+            on_done(i, result, "BROWSER")
 
-    if PLAYWRIGHT_OK:
-        q = queue.Queue()
+    if not PLAYWRIGHT_OK:
+        launch_errors.append("Playwright is not installed")
+    else:
+        ensure_browser()
+        import multiprocessing as mp
+        ctx = mp.get_context("spawn")
+        job_q, res_q = ctx.Queue(), ctx.Queue()
         for j in jobs:
-            q.put(j)
+            job_q.put(j)
+        n = max(1, min(workers, len(jobs)))
+        for _ in range(n):
+            job_q.put(None)                         # one stop signal per worker
 
-        def worker(wid: int):
+        procs, current, dead = {}, {}, set()        # current: wid -> (row index, start time)
+
+        def spawn(wid):
+            p = ctx.Process(target=_browser_child, args=(wid, job_q, res_q), daemon=True)
+            p.start()
+            procs[wid] = p
+
+        for wid in range(1, n + 1):
+            spawn(wid)
+            time.sleep(0.3)
+
+        while pending:
             try:
-                with sync_playwright() as pw:
-                    launch_args = dict(headless=True, args=[
-                        "--disable-blink-features=AutomationControlled", "--no-sandbox",
-                        "--disable-dev-shm-usage", "--disable-features=IsolateOrigins,site-per-process",
-                    ])
-                    try:
-                        # Real Google Chrome gets past Cloudflare more often than Chromium
-                        browser = pw.chromium.launch(channel="chrome", **launch_args)
-                    except Exception:
-                        browser = pw.chromium.launch(**launch_args)
-                    context = browser.new_context(
-                        user_agent=MAIN_HEADERS["User-Agent"], viewport={"width": 1280, "height": 800},
-                        locale="en-US", ignore_https_errors=True,
-                        extra_http_headers={"Accept-Language": "en-US,en;q=0.9", "DNT": "1"},
-                    )
-                    context.add_init_script("""
-                        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                        Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
-                        Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
-                        window.chrome = { runtime: {} };
-                    """)
-                    context.route("**/*.{png,jpg,jpeg,gif,svg,webp,woff,woff2,ttf,mp4,webm,ico}",
-                                  lambda r: r.abort())
-                    page = context.new_page()
-                    while True:
-                        try:
-                            i, row, reason, fallback = q.get_nowait()
-                        except queue.Empty:
-                            break
-                        try:
-                            if page.is_closed():
-                                page = context.new_page()
-                            result = browser_stage(page, row, reason, fallback)
-                        except Exception as e:
-                            result = fallback and _with_note(fallback, f"browser error — using HTTP result")
-                            result = result or last_resort(row, reason, str(e)[:80])
-                        finish(i, result)
-                    browser.close()
-            except Exception as e:
-                msg = str(e)
-                if "Executable doesn't exist" in msg:
-                    short = "Chrome is not installed on this server (run: python -m playwright install chromium)"
-                elif "shared librar" in msg or "missing dependencies" in msg.lower():
-                    short = "Chrome is missing system libraries (deploy with the Dockerfile / Docker runtime)"
-                else:
-                    short = msg.strip().splitlines()[0][:150] if msg.strip() else "unknown error"
-                launch_errors.append(short)
-                print(f"   ❌  Browser worker {wid} could not start: {short}")
+                msg = res_q.get(timeout=1)
+            except queue.Empty:
+                msg = None
 
-        threads = [threading.Thread(target=worker, args=(w,), daemon=True) for w in range(1, workers + 1)]
-        for t in threads:
-            t.start()
-            time.sleep(0.4)
-        for t in threads:
-            t.join()
+            if msg:
+                kind, wid = msg[0], msg[1]
+                if kind == "start":
+                    current[wid] = (msg[2], time.time())
+                elif kind == "done":
+                    current.pop(wid, None)
+                    finish(msg[2], msg[3])
+                elif kind == "launch_error":
+                    launch_errors.append(msg[2])
+                    dead.add(wid)
+                    print(f"   ❌  Browser worker {wid} could not start: {msg[2]}")
+
+            now = time.time()
+            for wid, p in list(procs.items()):
+                if wid in dead:
+                    continue
+                busy = current.get(wid)
+                too_slow = busy and now - busy[1] > ROW_BUDGET_S
+                crashed = not p.is_alive() and busy
+                if too_slow or crashed:
+                    i = busy[0]
+                    current.pop(wid, None)
+                    if p.is_alive():
+                        p.kill()
+                    p.join(timeout=5)
+                    _i, row, reason, fallback = by_index[i]
+                    note = (f"page took over {ROW_BUDGET_S}s — gave up" if too_slow
+                            else "browser crashed on this page")
+                    result = _with_note(fallback, f"browser: {note} — using HTTP result") if fallback else \
+                        make_result(f"⚠️ Verify manually — {note}", "⚠️ Manual Check",
+                                    f"Browser could not finish this page ({note}). Verify manually in your browser.",
+                                    "Headless browser")
+                    finish(i, result)
+                    spawn(wid)                      # fresh worker carries on with the queue
+
+            alive = [w for w, p in procs.items() if p.is_alive() and w not in dead]
+            if not alive and res_q.empty():
+                break                               # every worker finished or failed to start
+
+        for p in procs.values():
+            if p.is_alive():
+                p.kill()
 
     # Anything the browser never got to (no Playwright, Chromium missing, crash)
     why = f"headless browser unavailable — {launch_errors[0]}" if launch_errors else "headless browser unavailable"
