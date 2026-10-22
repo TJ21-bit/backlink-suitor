@@ -57,6 +57,12 @@ from openpyxl.utils import get_column_letter
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# On Render, keep Chrome inside the project folder (the default ~/.cache
+# location is not kept between Render's build and run steps).
+if os.environ.get("RENDER") and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), ".playwright")
+
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
     PLAYWRIGHT_OK = True
@@ -1492,10 +1498,48 @@ def _with_note(result: dict, note: str) -> dict:
     return result
 
 
+def _probe_browser():
+    """Try to start headless Chromium once. Returns None if OK, else the error text."""
+    if not PLAYWRIGHT_OK:
+        return "Playwright is not installed"
+    try:
+        with sync_playwright() as pw:
+            b = pw.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+            b.close()
+        return None
+    except Exception as e:
+        return str(e)
+
+
+def ensure_browser() -> bool:
+    """
+    Make sure Chromium is installed. If it's missing, download it now
+    (python -m playwright install chromium) — this happens once per server.
+    """
+    err = _probe_browser()
+    if err is None:
+        return True
+    if "Executable doesn't exist" not in err:
+        return False                       # installed but broken — installing again won't help
+    print("   ⏬  Chrome not found — downloading it now (one time, ~1-2 min)...")
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
+                       check=False, timeout=600)
+    except Exception as e:
+        print(f"   ❌  Chrome download failed: {str(e)[:150]}")
+        return False
+    ok = _probe_browser() is None
+    print("   ✅  Chrome installed." if ok else "   ❌  Chrome still won't start after download.")
+    return ok
+
+
 def run_browser_phase(jobs, on_done, workers: int):
     """jobs: list of (i, row, reason, fallback). Calls on_done(i, result, label)."""
     if not jobs:
         return
+    if PLAYWRIGHT_OK:
+        ensure_browser()
     pending = {j[0] for j in jobs}
     lock = threading.Lock()
     launch_errors = []
@@ -1688,6 +1732,8 @@ def main():
     parser.add_argument("--http-workers", type=int, default=HTTP_WORKERS)
     parser.add_argument("--browser-workers", type=int, default=BROWSER_WORKERS)
     parser.add_argument("--no-browser", action="store_true", help="HTTP only — skip the headless browser")
+    if "--install-browser" in sys.argv:                 # used by the web server at startup
+        sys.exit(0 if ensure_browser() else 1)
     args = parser.parse_args()
 
     output = args.output or args.input.replace(".xlsx", "_AUDITED.xlsx")
