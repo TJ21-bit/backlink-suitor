@@ -1498,6 +1498,9 @@ def run_browser_phase(jobs, on_done, workers: int):
         return
     pending = {j[0] for j in jobs}
     lock = threading.Lock()
+    launch_errors = []
+    if not PLAYWRIGHT_OK:
+        launch_errors.append("Playwright is not installed")
 
     def finish(i, result):
         with lock:
@@ -1552,7 +1555,15 @@ def run_browser_phase(jobs, on_done, workers: int):
                         finish(i, result)
                     browser.close()
             except Exception as e:
-                print(f"   ⚠️  Browser worker {wid} could not start: {str(e)[:120]}")
+                msg = str(e)
+                if "Executable doesn't exist" in msg:
+                    short = "Chrome is not installed on this server (run: python -m playwright install chromium)"
+                elif "shared librar" in msg or "missing dependencies" in msg.lower():
+                    short = "Chrome is missing system libraries (deploy with the Dockerfile / Docker runtime)"
+                else:
+                    short = msg.strip().splitlines()[0][:150] if msg.strip() else "unknown error"
+                launch_errors.append(short)
+                print(f"   ❌  Browser worker {wid} could not start: {short}")
 
         threads = [threading.Thread(target=worker, args=(w,), daemon=True) for w in range(1, workers + 1)]
         for t in threads:
@@ -1562,10 +1573,14 @@ def run_browser_phase(jobs, on_done, workers: int):
             t.join()
 
     # Anything the browser never got to (no Playwright, Chromium missing, crash)
+    why = f"headless browser unavailable — {launch_errors[0]}" if launch_errors else "headless browser unavailable"
+    if launch_errors and pending:
+        print(f"\n   ❌  BROWSER DID NOT START: {launch_errors[0]}")
+        print(f"       {len(pending)} rows that need a browser will be marked Manual Check.\n")
     for i, row, reason, fallback in jobs:
         if i in pending:
             result = _with_note(fallback, "no browser available — using HTTP result") if fallback \
-                else last_resort(row, reason, "headless browser unavailable")
+                else last_resort(row, reason, why)
             finish(i, result)
 
 
