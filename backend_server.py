@@ -42,6 +42,25 @@ def _load_dotenv(path):
 
 _load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+# On Render, keep Chrome inside the project folder and download it in the
+# background at startup if it's missing (child processes inherit this path).
+if os.environ.get("RENDER") and not os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    os.environ["PLAYWRIGHT_BROWSERS_PATH"] = os.path.join(BASE_DIR, ".playwright")
+
+
+def _install_browser_in_background():
+    import subprocess, sys
+    def run():
+        try:
+            subprocess.run([sys.executable, os.path.join(BASE_DIR, "backlink_auditor.py"),
+                            "--install-browser"], cwd=BASE_DIR, timeout=900)
+        except Exception as e:
+            print(f"Browser install error: {e}")
+    threading.Thread(target=run, daemon=True).start()
+
+
+_install_browser_in_background()
+
 # ── Telegram Config ────────────────────────────────────────────────────────
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 
