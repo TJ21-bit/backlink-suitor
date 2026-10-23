@@ -1550,17 +1550,35 @@ def ensure_browser() -> bool:
         return True
     if "Executable doesn't exist" not in err:
         return False                       # installed but broken — installing again won't help
-    print("   ⏬  Chrome not found — downloading it now (one time, ~1-2 min)...")
-    try:
-        import subprocess
-        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
-                       check=False, timeout=600)
-    except Exception as e:
-        print(f"   ❌  Chrome download failed: {str(e)[:150]}")
-        return False
-    ok = _probe_browser() is None
-    print("   ✅  Chrome installed." if ok else "   ❌  Chrome still won't start after download.")
-    return ok
+    print("   ⏬  Chrome not found — downloading it now (one time, usually under 2 min)...")
+    import subprocess
+    # --only-shell = just the headless browser (~100 MB instead of ~280 MB)
+    for cmd in ([sys.executable, "-m", "playwright", "install", "chromium", "--only-shell"],
+                [sys.executable, "-m", "playwright", "install", "chromium"]):
+        started, last_print = time.time(), 0
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, bufsize=1)
+            for line in proc.stdout:
+                line = line.strip().replace("\r", " ")
+                if "unknown option" in line.lower():
+                    break
+                # Show download progress every 10s so it never looks frozen
+                if line and (time.time() - last_print > 10 or "downloaded" in line.lower()):
+                    last_print = time.time()
+                    print(f"   ⏬  {line[-110:]}")
+                if time.time() - started > 300:
+                    print("   ❌  Chrome download took over 5 minutes — giving up for this run.")
+                    proc.kill()
+                    break
+            proc.wait(timeout=30)
+        except Exception as e:
+            print(f"   ❌  Chrome download failed: {str(e)[:150]}")
+        if _probe_browser() is None:
+            print(f"   ✅  Chrome installed ({int(time.time() - started)}s).")
+            return True
+    print("   ❌  Chrome still won't start — rows that need it will be marked Manual Check.")
+    return False
 
 
 def memory_limit_mb():
