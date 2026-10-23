@@ -541,9 +541,10 @@ def http_fetch(url: str, alt: bool = False) -> dict:
             res["code"]      = r.status_code
             res["final_url"] = r.url or url
             buf = bytearray()
+            deadline = time.time() + (15 if alt else 25)   # a server trickling bytes can't stall us
             for chunk in r.iter_content(8192):
                 buf.extend(chunk)
-                if len(buf) >= MAX_BODY_BYTES:
+                if len(buf) >= MAX_BODY_BYTES or time.time() > deadline:
                     break
             res["html"] = _decode(bytes(buf), r.headers.get("Content-Type", ""))
     except requests.exceptions.TooManyRedirects:
@@ -1562,11 +1563,40 @@ def ensure_browser() -> bool:
     return ok
 
 
+def memory_limit_mb():
+    """The container's memory limit in MB (Render, Docker), or None on a normal computer."""
+    for path in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+        try:
+            with open(path) as f:
+                v = f.read().strip()
+            if v != "max" and int(v) < 1 << 50:
+                return int(v) >> 20
+        except Exception:
+            continue
+    return None
+
+
+def safe_browser_workers(requested: int) -> int:
+    """Each Chrome worker needs ~350 MB; keep ~600 MB for the web server itself."""
+    limit = memory_limit_mb()
+    if not limit:
+        return requested
+    fit = max(1, (limit - 600) // 350)
+    if fit < requested:
+        print(f"   ℹ️  Server has {limit} MB of memory — using {fit} Chrome worker(s) instead of {requested}")
+    if limit < 1000:
+        print(f"   ⚠️  {limit} MB is too little for Chrome — it may crash. Use a 2 GB+ server plan.")
+    return min(requested, fit)
+
+
 def _launch_context(pw):
     """Start headless Chrome with the settings every worker uses."""
     launch_args = dict(headless=True, args=[
         "--disable-blink-features=AutomationControlled", "--no-sandbox",
         "--disable-dev-shm-usage", "--disable-features=IsolateOrigins,site-per-process",
+        # keep memory down
+        "--disable-gpu", "--disable-extensions", "--disable-background-networking",
+        "--renderer-process-limit=2", "--js-flags=--max-old-space-size=256",
     ])
     try:
         # Real Google Chrome gets past Cloudflare more often than Chromium
@@ -1608,6 +1638,7 @@ def _browser_child(wid, job_q, res_q):
     except Exception:
         pass
     try:
+        print(f"   🔧  Chrome worker {wid}: starting...")
         with sync_playwright() as pw:
             try:
                 browser, context = _launch_context(pw)
@@ -1615,12 +1646,24 @@ def _browser_child(wid, job_q, res_q):
                 res_q.put(("launch_error", wid, _short_launch_error(str(e))))
                 return
             page = context.new_page()
+            print(f"   🔧  Chrome worker {wid}: ready")
+            done_here = 0
             while True:
                 job = job_q.get()
                 if job is None:
                     break
                 i, row, reason, fallback = job
                 res_q.put(("start", wid, i))
+                print(f"   …  worker {wid} opening row #{i}: {str(row.get('Backlink Live Link', ''))[:70]}")
+                # Restart Chrome every 10 rows — long sessions slowly eat memory
+                if done_here and done_here % 10 == 0:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
+                    browser, context = _launch_context(pw)
+                    page = context.new_page()
+                done_here += 1
                 try:
                     if page.is_closed():
                         page = context.new_page()
@@ -1652,6 +1695,7 @@ def run_browser_phase(jobs, on_done, workers: int):
         launch_errors.append("Playwright is not installed")
     else:
         ensure_browser()
+        workers = safe_browser_workers(workers)
         import multiprocessing as mp
         ctx = mp.get_context("spawn")
         job_q, res_q = ctx.Queue(), ctx.Queue()
@@ -1672,7 +1716,15 @@ def run_browser_phase(jobs, on_done, workers: int):
             spawn(wid)
             time.sleep(0.3)
 
+        last_beat = time.time()
+        print(f"   🔧  Starting {n} Chrome worker(s)...")
         while pending:
+            if time.time() - last_beat > 30:
+                last_beat = time.time()
+                busy = ", ".join(f"worker {w}: row #{r} for {int(time.time() - t)}s"
+                                 for w, (r, t) in sorted(current.items())) or "no rows open yet"
+                alive_n = sum(1 for w, p in procs.items() if p.is_alive())
+                print(f"   ⏳  still working — {len(pending)} rows left, {alive_n} worker(s) alive ({busy})")
             try:
                 msg = res_q.get(timeout=1)
             except queue.Empty:
